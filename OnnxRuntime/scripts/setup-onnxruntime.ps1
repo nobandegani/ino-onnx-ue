@@ -1,16 +1,17 @@
 # setup-onnxruntime.ps1
 #
-# One-time setup (idempotent) for the ONNX Runtime half of the InoAgents plugin.
+# One-time setup (idempotent) for the InoOnnx plugin.
 #
 # Downloads Microsoft's prebuilt ONNX Runtime binaries for Win64 and Android
-# arm64-v8a, stages the headers + import lib under
-#   Plugins/InoAgents/Source/ThirdParty/InoOnnxRuntime/
-# and the runtime .dll / .so files under
-#   Plugins/InoAgents/Binaries/ThirdParty/InoOnnxRuntime/
+# arm64-v8a, stages everything (headers + DLLs/.so) under a flat tree:
+#   Plugins/InoOnnx/Source/ThirdParty/
+#     Public/                          C / C++ API headers
+#     Win64/                           InoOnnxRuntime.dll, InoDml.dll, providers_shared
+#     Android/arm64-v8a/               libInoOnnxRuntime.so
 #
 # Pinned versions live in two files:
-#   Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION   (e.g. "1.24.3")
-#   Plugins/InoAgents/OnnxRuntime/DIRECTML_VERSION      (e.g. "1.15.4")
+#   Plugins/InoOnnx/OnnxRuntime/ONNXRUNTIME_VERSION   (e.g. "1.24.3")
+#   Plugins/InoOnnx/OnnxRuntime/DIRECTML_VERSION      (e.g. "1.15.4")
 # Bump either + re-run this script to update the corresponding binaries.
 #
 # Windows sources:
@@ -81,16 +82,14 @@
 #
 # Artifacts on disk after this runs (assuming ORT 1.24.3 + DML 1.15.4):
 #
-#   Source/ThirdParty/InoOnnxRuntime/
-#     Public/                         (C / C++ API headers + dml_provider_factory.h)
-#
-#   Binaries/ThirdParty/InoOnnxRuntime/
+#   Source/ThirdParty/
+#     Public/                              (C / C++ API headers + dml_provider_factory.h)
 #     Win64/
-#       InoOnnxRuntime.dll            (~13 MB — RENAMED from onnxruntime.dll)
+#       InoOnnxRuntime.dll                 (~13 MB — RENAMED from onnxruntime.dll)
+#       InoDml.dll                         (~18 MB — RENAMED from DirectML.dll)
 #       onnxruntime_providers_shared.dll   (~200 KB, original name)
-#       DirectML.dll                  (~18 MB, original name, from MS.AI.DirectML NuGet)
 #     Android/arm64-v8a/
-#       libInoOnnxRuntime.so          (~25 MB, CPU + XNNPACK)
+#       libInoOnnxRuntime.so               (~25 MB, CPU + XNNPACK)
 
 $ErrorActionPreference = "Stop"
 
@@ -101,13 +100,18 @@ $VersionFile    = Join-Path $OnnxRtDir "ONNXRUNTIME_VERSION"
 $DmlVersionFile = Join-Path $OnnxRtDir "DIRECTML_VERSION"
 $CacheDir     = Join-Path $OnnxRtDir ".cache"
 
-# Staging destinations. Note there is no Win64 "lib" directory anymore —
-# dynamic loading (GetProcAddress on the renamed DLL) means we never link
-# against the ORT import library at UE build time.
-$ThirdPartyDir    = Join-Path $PluginDir "Source\ThirdParty\InoOnnxRuntime"
+# Staging destinations. Everything (headers + Win64 DLLs + Android .so)
+# lives under Source/ThirdParty/ in a flat layout — Public/, Win64/,
+# Android/<arch>/ — matching the InoLiteRT plugin's pattern. No
+# Binaries/ThirdParty/ tree.
+#
+# Note there is no Win64 "lib" directory — dynamic loading (GetProcAddress
+# on the renamed DLL) means we never link against the ORT import library
+# at UE build time.
+$ThirdPartyDir    = Join-Path $PluginDir "Source\ThirdParty"
 $PublicIncDir     = Join-Path $ThirdPartyDir "Public"
-$Win64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Win64"
-$Arm64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Android\arm64-v8a"
+$Win64BinStageDir = Join-Path $ThirdPartyDir "Win64"
+$Arm64BinStageDir = Join-Path $ThirdPartyDir "Android\arm64-v8a"
 
 #---------------------------------------------------------------------
 # 1. Load pinned versions
