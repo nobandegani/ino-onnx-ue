@@ -70,7 +70,7 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 	<!--
 	soLoadLibrary: emit System.loadLibrary("InoOnnxRuntime") in the
 	Java launcher activity so the ORT .so is resident by the time
-	InoOnnxModule::Init's dlopen call runs.
+	FInoOnnxModule::StartupModule's dlopen call runs.
 
 	Since we no longer PublicAdditionalLibraries on Android, libUnreal.so
 	does NOT DT_NEEDED our library — the dynamic linker wouldn't pick
