@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+
+InoOnnxRuntime — Unreal Plugin Language (UPL) file for Android APK
+packaging of the ONNX Runtime shared library.
+
+Referenced from InoOnnxRuntime.Build.cs via
+    AdditionalPropertiesForReceipt.Add("AndroidPlugin", "<this file>")
+
+Two concerns handled here, matching the proven pattern from
+the LiteRT-LM UPL (InoLiteRT_UPL_Android.xml in the sibling
+InoLiteRT plugin):
+
+  1. Java-side loadLibrary: emit System.loadLibrary("onnxruntime")
+     in the generated GameActivity Java so the library is loaded
+     before libUnreal.so runs.
+
+  2. APK staging: copy libonnxruntime.so from the plugin's
+     Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/ into the
+     APK's lib/arm64-v8a/ directory so Android's dynamic linker can
+     resolve libUnreal.so's DT_NEEDED(libonnxruntime.so) at process
+     start.
+
+Both are required. Empirically, Build.cs RuntimeDependencies alone does
+NOT stage a .so into lib/arm64-v8a/ of the APK — explicit <copyFile>
+in <resourceCopies> is what gets it there.
+
+Path variable gotchas (lessons from the LiteRT-LM UPL — see
+Plugins/InoLiteRT/Source/InoLiteRT/InoLiteRT_UPL_Android.xml):
+
+  $S(AbsPluginDir)  — resolves to THIS MODULE's directory, i.e.
+                       Plugins/InoAgents/Source/ThirdParty/InoOnnxRuntime/
+                       (despite the "Plugin" in the name — that's how UE's
+                       UPL engine labels it).
+  $S(PluginDir)     — does NOT exist as a UPL variable; using it
+                       produces an empty string and silently breaks the
+                       copy. Always use $S(AbsPluginDir).
+  $S(BuildDir)      — Intermediate/Android/<arch>/gradle/app/src/main/
+  $S(Architecture)  — arm64-v8a, etc.
+
+Our .so lives at
+    Plugins/InoAgents/Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/libonnxruntime.so
+which is 3 levels up from $S(AbsPluginDir), then down through Binaries.
+
+Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage/
+
+-->
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+
+	<!-- File trace for debugging: UE logs a line whenever this UPL is
+	     processed. Useful for confirming the packager picked it up. -->
+	<trace enable="true"/>
+
+	<!--
+	init: runs once per architecture. Gate the copies on architecture so
+	we don't try to copy arm64-v8a binaries into a different arch's build
+	dir. Matches the stock UE UPL pattern (see e.g. Engine/Source/ThirdParty/
+	libGPUCounters/libGPUCounters_UPL.xml).
+	-->
+	<init>
+		<log text="InoOnnxRuntime UPL init"/>
+		<setBool result="bSupported" value="false"/>
+		<isArch arch="arm64-v8a">
+			<setBool result="bSupported" value="true"/>
+		</isArch>
+		<if condition="bSupported">
+			<false>
+				<log text="InoOnnxRuntime: unsupported architecture $S(Architecture), skipping ORT staging"/>
+			</false>
+		</if>
+	</init>
+
+	<!--
+	soLoadLibrary: emit System.loadLibrary("InoOnnxRuntime") in the
+	Java launcher activity so the ORT .so is resident by the time
+	InoOnnxModule::Init's dlopen call runs.
+
+	Since we no longer PublicAdditionalLibraries on Android, libUnreal.so
+	does NOT DT_NEEDED our library — the dynamic linker wouldn't pick
+	it up automatically. The soLoadLibrary preload here is what gets
+	it mapped into the process. If it fails we get a catchable Java
+	UnsatisfiedLinkError rather than a silent native abort.
+
+	Named "InoOnnxRuntime" to match the renamed .so file
+	(libInoOnnxRuntime.so, Android convention lib<name>.so →
+	System.loadLibrary("<name>")).
+
+	failmsg surfaces in logcat as
+	    "AndroidJNI failed to load library 'InoOnnxRuntime'. Reason: <failmsg>"
+	-->
+	<soLoadLibrary>
+		<loadLibrary name="InoOnnxRuntime" failmsg="Failed to load libInoOnnxRuntime.so — ensure OnnxRuntime/scripts/setup-onnxruntime.ps1 has been run and the APK re-packaged."/>
+	</soLoadLibrary>
+
+	<!--
+	resourceCopies: copy libInoOnnxRuntime.so (our renamed ORT runtime)
+	into the APK's lib/arm64-v8a/ directory. The rename to a unique
+	filename lets our .so coexist in the same APK with any marketplace
+	plugin's libonnxruntime.so — which would otherwise be a filename
+	collision in the lib/<arch>/ directory, and the last-writer would
+	clobber the other.
+	-->
+	<resourceCopies>
+		<if condition="bSupported">
+			<true>
+				<copyFile
+					src="$S(AbsPluginDir)/../../../Binaries/ThirdParty/InoOnnxRuntime/Android/$S(Architecture)/libInoOnnxRuntime.so"
+					dst="$S(BuildDir)/libs/$S(Architecture)/libInoOnnxRuntime.so"/>
+				<log text="InoOnnxRuntime: copied libInoOnnxRuntime.so"/>
+			</true>
+		</if>
+	</resourceCopies>
+
+</root>

@@ -1,0 +1,2 @@
+# Download cache — populated by setup-onnxruntime.ps1, safe to wipe.
+.cache/
