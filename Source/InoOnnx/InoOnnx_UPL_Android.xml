@@ -1,37 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
 
-InoOnnxRuntime — Unreal Plugin Language (UPL) file for Android APK
-packaging of the ONNX Runtime shared library.
+InoOnnx — Unreal Plugin Language (UPL) file for Android APK packaging
+of the ONNX Runtime shared library.
 
-Referenced from InoOnnxRuntime.Build.cs via
+Referenced from InoOnnx.Build.cs via
     AdditionalPropertiesForReceipt.Add("AndroidPlugin", "<this file>")
 
-Two concerns handled here, matching the proven pattern from
-the LiteRT-LM UPL (InoLiteRT_UPL_Android.xml in the sibling
-InoLiteRT plugin):
+Two concerns handled here, matching the proven pattern from the
+sibling InoLiteRT plugin's InoLiteRT_UPL_Android.xml:
 
-  1. Java-side loadLibrary: emit System.loadLibrary("onnxruntime")
+  1. Java-side loadLibrary: emit System.loadLibrary("InoOnnxRuntime")
      in the generated GameActivity Java so the library is loaded
      before libUnreal.so runs.
 
-  2. APK staging: copy libonnxruntime.so from the plugin's
-     Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/ into the
-     APK's lib/arm64-v8a/ directory so Android's dynamic linker can
-     resolve libUnreal.so's DT_NEEDED(libonnxruntime.so) at process
-     start.
+  2. APK staging: copy libInoOnnxRuntime.so from the plugin's
+     Source/ThirdParty/Android/arm64-v8a/ into the APK's
+     lib/arm64-v8a/ directory so Android's dynamic linker can find
+     it via dlopen() at runtime.
 
-Both are required. Empirically, Build.cs RuntimeDependencies alone does
-NOT stage a .so into lib/arm64-v8a/ of the APK — explicit <copyFile>
-in <resourceCopies> is what gets it there.
+Both are required. Empirically, Build.cs RuntimeDependencies alone
+does NOT stage a .so into lib/arm64-v8a/ of the APK — explicit
+<copyFile> in <resourceCopies> is what gets it there.
 
-Path variable gotchas (lessons from the LiteRT-LM UPL — see
-Plugins/InoLiteRT/Source/InoLiteRT/InoLiteRT_UPL_Android.xml):
+Path variable gotchas (lessons from the LiteRT-LM UPL):
 
   $S(AbsPluginDir)  — resolves to THIS MODULE's directory, i.e.
-                       Plugins/InoAgents/Source/ThirdParty/InoOnnxRuntime/
-                       (despite the "Plugin" in the name — that's how UE's
-                       UPL engine labels it).
+                       Plugins/InoOnnx/Source/InoOnnx/
+                       (despite the "Plugin" in the name — that's how
+                       UE's UPL engine labels it).
   $S(PluginDir)     — does NOT exist as a UPL variable; using it
                        produces an empty string and silently breaks the
                        copy. Always use $S(AbsPluginDir).
@@ -39,8 +36,8 @@ Plugins/InoLiteRT/Source/InoLiteRT/InoLiteRT_UPL_Android.xml):
   $S(Architecture)  — arm64-v8a, etc.
 
 Our .so lives at
-    Plugins/InoAgents/Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/libonnxruntime.so
-which is 3 levels up from $S(AbsPluginDir), then down through Binaries.
+    Plugins/InoOnnx/Source/ThirdParty/Android/arm64-v8a/libInoOnnxRuntime.so
+which is one level up from $S(AbsPluginDir), then down through ThirdParty.
 
 Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage/
 
@@ -58,14 +55,14 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 	libGPUCounters/libGPUCounters_UPL.xml).
 	-->
 	<init>
-		<log text="InoOnnxRuntime UPL init"/>
+		<log text="InoOnnx UPL init"/>
 		<setBool result="bSupported" value="false"/>
 		<isArch arch="arm64-v8a">
 			<setBool result="bSupported" value="true"/>
 		</isArch>
 		<if condition="bSupported">
 			<false>
-				<log text="InoOnnxRuntime: unsupported architecture $S(Architecture), skipping ORT staging"/>
+				<log text="InoOnnx: unsupported architecture $S(Architecture), skipping ORT staging"/>
 			</false>
 		</if>
 	</init>
@@ -104,9 +101,9 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 		<if condition="bSupported">
 			<true>
 				<copyFile
-					src="$S(AbsPluginDir)/../../../Binaries/ThirdParty/InoOnnxRuntime/Android/$S(Architecture)/libInoOnnxRuntime.so"
+					src="$S(AbsPluginDir)/../ThirdParty/Android/$S(Architecture)/libInoOnnxRuntime.so"
 					dst="$S(BuildDir)/libs/$S(Architecture)/libInoOnnxRuntime.so"/>
-				<log text="InoOnnxRuntime: copied libInoOnnxRuntime.so"/>
+				<log text="InoOnnx: copied libInoOnnxRuntime.so"/>
 			</true>
 		</if>
 	</resourceCopies>
