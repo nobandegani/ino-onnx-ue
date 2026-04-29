@@ -11,9 +11,9 @@
 	"MarketplaceURL": "",
 	"SupportURL": "",
 	"CanContainContent": true,
-	"IsBetaVersion": false,
-	"IsExperimentalVersion": false,
-	"Installed": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": true,
 	"Modules": [
 		{
 			"Name": "InoOnnx",
