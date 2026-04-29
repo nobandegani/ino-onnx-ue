@@ -33,10 +33,10 @@
 DEFINE_LOG_CATEGORY(LogInoOnnx);
 
 // =============================================================
-// InoAgents::Onnx — DLL loader + global OrtApi accessor
+// InoOnnx — DLL loader + global OrtApi accessor
 // =============================================================
 
-namespace InoAgents::Onnx
+namespace InoOnnx
 {
 
 namespace
@@ -462,7 +462,7 @@ const OrtApi* GetApi()
     return GOrtApi;
 }
 
-} // namespace InoAgents::Onnx
+} // namespace InoOnnx
 
 // =============================================================
 // FInoOnnxModule — UE module class
@@ -470,12 +470,12 @@ const OrtApi* GetApi()
 
 void FInoOnnxModule::StartupModule()
 {
-    OnnxRuntimeHandle = InoAgents::Onnx::Init();
+    OnnxRuntimeHandle = InoOnnx::Init();
 }
 
 void FInoOnnxModule::ShutdownModule()
 {
-    InoAgents::Onnx::Shutdown(OnnxRuntimeHandle);
+    InoOnnx::Shutdown(OnnxRuntimeHandle);
     OnnxRuntimeHandle = nullptr;
 }
 

@@ -11,14 +11,23 @@ public class InoOnnx : ModuleRules
 
 		PublicIncludePaths.AddRange(
 			new string[] {
-				// ... add public include paths required here ...
+				// Subdirectory of Public/ that holds the C++ wrapper
+				// headers (InoOnnxSession.h, InoOnnxTensor.h, InoOnnxTypes.h).
+				// Exposed as a Public include path so consumers can use
+				// the bare #include "InoOnnxSession.h" without the
+				// "Onnx/" subdir prefix.
+				Path.Combine(ModuleDirectory, "Public", "Onnx"),
 			}
 			);
 
 
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				// ... add other private include paths required here ...
+				// Subdirectory of Private/ that holds the wrapper impl
+				// files (InoOnnxInternal.{h,cpp}, InoOnnxSession.cpp,
+				// InoOnnxTensor.cpp). Lets the .cpps include the internal
+				// helper without a relative path.
+				Path.Combine(ModuleDirectory, "Private", "Onnx"),
 			}
 			);
 

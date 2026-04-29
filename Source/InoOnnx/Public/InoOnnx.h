@@ -25,13 +25,13 @@ INOONNX_API DECLARE_LOG_CATEGORY_EXTERN(LogInoOnnx, Log, All);
  * StartupModule runs. Consumers (InoAgents today, future ones tomorrow)
  * declare InoOnnx in their .uplugin's Plugins array and "InoOnnx" in
  * their Build.cs PublicDependencyModuleNames, then `#include "InoOnnx.h"`
- * and call `InoAgents::Onnx::GetApi()` to reach the OrtApi vtable.
+ * and call `InoOnnx::GetApi()` to reach the OrtApi vtable.
  *
  * StartupModule loads the ORT DLL/.so, resolves OrtGetApiBase via
  * GetProcAddress / dlsym, caches the OrtApi vtable, and runs a smoke
  * test (OrtApi::GetAvailableProviders) so the log shows whether ORT is
  * callable end-to-end. Failure here is non-fatal — Init() logs its own
- * error; consumers null-check InoAgents::Onnx::GetApi() before use.
+ * error; consumers null-check InoOnnx::GetApi() before use.
  */
 class FInoOnnxModule : public IModuleInterface
 {
@@ -43,7 +43,7 @@ public:
 
 private:
     /** Handle to InoOnnxRuntime.dll / libInoOnnxRuntime.so, returned by
-     *  InoAgents::Onnx::Init(). nullptr on unsupported platforms or if
+     *  InoOnnx::Init(). nullptr on unsupported platforms or if
      *  the load failed. Passed to Shutdown() at module teardown. */
     void* OnnxRuntimeHandle = nullptr;
 };
@@ -51,9 +51,9 @@ private:
 /**
  * ONNX Runtime DLL loader + global OrtApi accessor.
  *
- * The namespace is `InoAgents::Onnx::` for historical reasons (this code
+ * The namespace is `InoOnnx::` for historical reasons (this code
  * was extracted from the InoAgents plugin). Consumer code that already
- * spells `InoAgents::Onnx::GetApi()` continues to work unchanged.
+ * spells `InoOnnx::GetApi()` continues to work unchanged.
  *
  * Init() / Shutdown() are called by FInoOnnxModule (above). Consumer
  * plugins should NOT call them directly — the lifecycle is owned by
@@ -79,7 +79,7 @@ private:
  *   - Warns. GetApi() returns nullptr. Any consumer that calls GetApi()
  *     and checks the return handles this gracefully.
  */
-namespace InoAgents::Onnx
+namespace InoOnnx
 {
     INOONNX_API void* Init();
     INOONNX_API void  Shutdown(void* Handle);
