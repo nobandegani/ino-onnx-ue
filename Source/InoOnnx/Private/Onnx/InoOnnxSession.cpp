@@ -178,43 +178,99 @@ namespace
 #endif
         }
 
-        // Apply DirectML-mandated session options BEFORE the provider
-        // registration loop. Microsoft's DML EP docs require these two
-        // settings whenever DML is the effective provider:
-        //
-        //   1. DisableMemPattern — DML uses D3D12 resource binding that
-        //      conflicts with ORT's memory-pattern optimization (which
-        //      assumes contiguous host allocations ORT can reuse across
-        //      inferences). Without this, DML sessions crash or produce
-        //      wrong output on the second inference.
-        //
-        //   2. ExecutionMode::ORT_SEQUENTIAL — DML currently doesn't
-        //      support parallel multi-op graph execution. ORT_PARALLEL
-        //      (the default in some builds) would schedule DML kernels
-        //      across multiple queues which the EP doesn't handle.
-        //
-        // Applied unconditionally if DML is in the provider list, even
-        // before we know whether the DML registration will succeed.
-        // Rationale: applying them always is a minor CPU perf cost
-        // (mem-pattern off) but required for correctness when DML IS
-        // active. Applying them conditionally would require a two-pass
-        // register-then-configure flow, and these settings are cheap
-        // enough on CPU that the simpler single-pass approach wins.
-        const bool bDmlRequested =
-            Options.ExecutionProviders.Contains(EInoOnnxProvider::DirectMl);
-        if (bDmlRequested)
+        // Apply user-requested execution mode + memory tunables.
+        const ExecutionMode UserExecMode =
+            (Options.ExecutionMode == EInoOnnxExecutionMode::Parallel)
+                ? ORT_PARALLEL : ORT_SEQUENTIAL;
+        if (!CheckStatus(Api->SetSessionExecutionMode(Opts, UserExecMode),
+                         TEXT("SetSessionExecutionMode"), OutError))
         {
-            if (!CheckStatus(Api->DisableMemPattern(Opts),
-                             TEXT("DisableMemPattern (required for DML)"), OutError))
+            Api->ReleaseSessionOptions(Opts);
+            return nullptr;
+        }
+
+        if (Options.bEnableMemPattern)
+        {
+            if (!CheckStatus(Api->EnableMemPattern(Opts),
+                             TEXT("EnableMemPattern"), OutError))
             {
                 Api->ReleaseSessionOptions(Opts);
                 return nullptr;
             }
-            if (!CheckStatus(Api->SetSessionExecutionMode(Opts, ORT_SEQUENTIAL),
-                             TEXT("SetSessionExecutionMode=ORT_SEQUENTIAL (required for DML)"), OutError))
+        }
+        else
+        {
+            if (!CheckStatus(Api->DisableMemPattern(Opts),
+                             TEXT("DisableMemPattern"), OutError))
             {
                 Api->ReleaseSessionOptions(Opts);
                 return nullptr;
+            }
+        }
+
+        if (Options.bEnableCpuMemArena)
+        {
+            if (!CheckStatus(Api->EnableCpuMemArena(Opts),
+                             TEXT("EnableCpuMemArena"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+        else
+        {
+            if (!CheckStatus(Api->DisableCpuMemArena(Opts),
+                             TEXT("DisableCpuMemArena"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
+        if (!Options.SessionLogId.IsEmpty())
+        {
+            const FTCHARToUTF8 Id(*Options.SessionLogId);
+            if (!CheckStatus(Api->SetSessionLogId(Opts, Id.Get()),
+                             TEXT("SetSessionLogId"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
+        // DirectML mandates two settings whenever DML is the effective
+        // provider. Microsoft's DML EP docs require:
+        //   1. DisableMemPattern — DML uses D3D12 resource binding that
+        //      conflicts with mem-pattern's contiguous-host assumption;
+        //      without this, DML sessions crash or produce wrong output
+        //      on the second inference.
+        //   2. ExecutionMode::ORT_SEQUENTIAL — DML doesn't support
+        //      parallel multi-op graph execution.
+        //
+        // Applied unconditionally if DML is in the provider list, even
+        // before we know whether DML registration will succeed. If the
+        // user requested incompatible settings we override + log; the
+        // alternative would be a two-pass register-then-configure flow,
+        // and these settings are cheap so single-pass wins.
+        const bool bDmlRequested =
+            Options.ExecutionProviders.Contains(EInoOnnxProvider::DirectMl);
+        if (bDmlRequested)
+        {
+            if (Options.ExecutionMode != EInoOnnxExecutionMode::Sequential)
+            {
+                UE_LOG(LogInoOnnx, Warning,
+                       TEXT("Onnx: Session: DML requires Sequential execution; ")
+                       TEXT("overriding user-requested Parallel mode"));
+                CheckStatus(Api->SetSessionExecutionMode(Opts, ORT_SEQUENTIAL),
+                            TEXT("SetSessionExecutionMode (DML override)"), nullptr);
+            }
+            if (Options.bEnableMemPattern)
+            {
+                UE_LOG(LogInoOnnx, Warning,
+                       TEXT("Onnx: Session: DML requires MemPattern off; ")
+                       TEXT("overriding user-requested bEnableMemPattern=true"));
+                CheckStatus(Api->DisableMemPattern(Opts),
+                            TEXT("DisableMemPattern (DML override)"), nullptr);
             }
         }
 
@@ -252,9 +308,32 @@ namespace
                     break;
 
                 case EInoOnnxProvider::Nnapi:
+                {
+                    // Build provider-options key/val arrays from the
+                    // typed NNAPI fields. Empty arrays = NNAPI defaults
+                    // (FP32, NHWC, CPU fallback enabled).
+                    TArray<const char*> NnapiKeys;
+                    TArray<const char*> NnapiVals;
+                    if (Options.bNnapiUseFp16)
+                    {
+                        NnapiKeys.Add("use_fp16");     NnapiVals.Add("1");
+                    }
+                    if (Options.bNnapiUseNchw)
+                    {
+                        NnapiKeys.Add("use_nchw");     NnapiVals.Add("1");
+                    }
+                    if (Options.bNnapiCpuDisabled)
+                    {
+                        NnapiKeys.Add("cpu_disabled"); NnapiVals.Add("1");
+                    }
+
                     RegStatus = Api->SessionOptionsAppendExecutionProvider(
-                        Opts, "NNAPI", nullptr, nullptr, 0);
-                    break;
+                        Opts, "NNAPI",
+                        NnapiKeys.GetData(),
+                        NnapiVals.GetData(),
+                        (size_t)NnapiKeys.Num());
+                }
+                break;
 
                 case EInoOnnxProvider::WebGpu:
                     RegStatus = Api->SessionOptionsAppendExecutionProvider(
