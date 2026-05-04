@@ -1024,6 +1024,26 @@ bool FInoOnnxSession::Run(
     return true;
 }
 
+bool FInoOnnxSession::Warmup(
+    TArrayView<const FInoOnnxTensor> DummyInputs,
+    FString* OutError)
+{
+    const double WarmT0 = FPlatformTime::Seconds();
+
+    TArray<FInoOnnxTensor> DiscardOutputs;
+    if (!Run(DummyInputs, DiscardOutputs, OutError))
+    {
+        UE_LOG(LogInoOnnx, Warning,
+               TEXT("Onnx: Session: warmup failed — first real inference will pay the JIT cost"));
+        return false;
+    }
+
+    UE_LOG(LogInoOnnx, Log,
+           TEXT("Onnx: Session: warmup ok in %.1f ms"),
+           (FPlatformTime::Seconds() - WarmT0) * 1000.0);
+    return true;
+}
+
 void FInoOnnxSession::RunAsync(
     TArray<FInoOnnxTensor>&& Inputs,
     TFunction<void(TArray<FInoOnnxTensor>, FString)> OnComplete)

@@ -170,6 +170,27 @@ public:
         FString* OutError = nullptr);
 
     /**
+     * Run a single discardable inference to pay the JIT / kernel-
+     * selection / memory-pattern setup costs upfront. The first Run()
+     * after Create() is typically 2-10x slower than steady state on
+     * any non-trivial graph; calling Warmup once at session-load time
+     * moves that cost off the user-visible inference hot path.
+     *
+     * Pass dummy inputs that match the model's input signature —
+     * typically minimum-size zero tensors. The caller knows what
+     * "small but valid" looks like for their model. Outputs are
+     * discarded internally; only the timing log on success is
+     * useful externally.
+     *
+     * Failure is non-fatal: the first real Run() will simply pay the
+     * setup cost itself. Returns false (with *OutError populated if
+     * non-null) so the caller can choose to log or surface.
+     */
+    bool Warmup(
+        TArrayView<const FInoOnnxTensor> DummyInputs,
+        FString* OutError = nullptr);
+
+    /**
      * Run inference asynchronously on the UE thread pool. Completion
      * callback fires on the GAME THREAD via AsyncTask(GameThread).
      *
