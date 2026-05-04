@@ -9,9 +9,17 @@ inside `Plugins/InoOnnx/`. The hosting demo project is documented in
 `InoOnnx` is an Unreal Engine 5.7 runtime plugin whose job is to
 **stage Microsoft's prebuilt ONNX Runtime + DirectML binaries and expose
 them as a UE module** that other plugins (currently `InoAgents`) declare
-as a dependency. Consumers `#include "InoOnnx.h"` and call
-`InoAgents::Onnx::GetApi()` to reach the `OrtApi*` vtable; ORT sessions /
-tensors are then driven through that vtable.
+as a dependency. Consumers have two API levels to choose from:
+
+- **Raw C API** — `#include "InoOnnx.h"` and call `InoOnnx::GetApi()`
+  for the `OrtApi*` vtable; drive sessions and tensors directly through
+  it. Maximum control, zero abstraction overhead.
+- **Generic C++ wrapper** — `#include "InoOnnxSession.h"` /
+  `InoOnnxTensor.h` for `FInoOnnxSession`, `FInoOnnxTensor`, and the
+  `EInoOnnxDtype` / `EInoOnnxProvider` enums. Move-only RAII, async
+  runs, dtype-safe data access. The right default for any new ORT
+  integration unless you specifically need raw-C-API control. See
+  "Generic ORT C++ wrapper" below.
 
 Unlike LiteRT-LM (built from source by the sibling `InoLiteRT` plugin),
 ORT is consumed pre-built — Microsoft ships an industry-standard binary
@@ -58,17 +66,30 @@ Plugins/InoOnnx/
     │   ├── InoOnnx.Build.cs         ← embeds third-party wiring
     │   │                              (RuntimeDependencies, UPL, includes)
     │   ├── InoOnnx_UPL_Android.xml  ← APK packaging directives
-    │   ├── Public/InoOnnx.h         ← FInoOnnxModule + namespace InoAgents::Onnx
-    │   │                              + LogInoOnnx category
-    │   └── Private/InoOnnx.cpp      ← StartupModule loads DLL + smoke test
+    │   ├── Public/
+    │   │   ├── InoOnnx.h            ← FInoOnnxModule + namespace InoOnnx
+    │   │   │                          (Init/Shutdown/GetApi) + LogInoOnnx
+    │   │   └── Onnx/                ← generic, model-agnostic ORT C++ wrapper
+    │   │       ├── InoOnnxTypes.h   ← EInoOnnxDtype, EInoOnnxProvider,
+    │   │       │                      EInoOnnxGraphOptimizationLevel,
+    │   │       │                      FInoOnnxSessionOptions
+    │   │       ├── InoOnnxSession.h ← FInoOnnxSession (load .onnx, run sync/async)
+    │   │       └── InoOnnxTensor.h  ← FInoOnnxTensor (move-only OrtValue wrapper)
+    │   └── Private/
+    │       ├── InoOnnx.cpp          ← StartupModule: DLL load + smoke test
+    │       └── Onnx/                ← wrapper impl
+    │           ├── InoOnnxInternal.{h,cpp}  ← shared helpers (status check,
+    │           │                              dtype mapping, global OrtEnv)
+    │           ├── InoOnnxSession.cpp
+    │           └── InoOnnxTensor.cpp
     │
     └── ThirdParty/                  ← staged setup outputs (consumed by UE)
         ├── Public/                  ← ORT C / C++ API headers
         │   └── (onnxruntime_c_api.h + dml_provider_factory.h + …)
         ├── Win64/                   ← Windows DLLs
-        │   ├── InoOnnxRuntime.dll              (RENAMED from onnxruntime.dll, ~13 MB)
+        │   ├── InoOnnxRuntime.dll              (RENAMED from onnxruntime.dll, ~17 MB)
         │   ├── InoDml.dll                      (RENAMED from DirectML.dll, ~18 MB)
-        │   └── onnxruntime_providers_shared.dll (original name, ~200 KB)
+        │   └── onnxruntime_providers_shared.dll (original name, ~22 KB)
         └── Android/arm64-v8a/
             └── libInoOnnxRuntime.so            (RENAMED from libonnxruntime.so, ~25 MB)
 ```
@@ -80,8 +101,10 @@ In a consumer plugin's `Build.cs`:
 ```csharp
 PublicDependencyModuleNames.AddRange(new string[] {
     "InoOnnx",   // exposes <onnxruntime_c_api.h> + <InoOnnx.h>
-                 // (provides InoAgents::Onnx::GetApi() accessor for the
-                 //  OrtApi vtable). Stages the runtime DLLs/.so for cook.
+                 // (provides InoOnnx::GetApi() accessor for the OrtApi
+                 //  vtable). Also exposes <InoOnnxSession.h> + friends
+                 //  for the generic C++ wrapper. Stages the runtime
+                 //  DLLs/.so for cook.
 });
 ```
 
@@ -99,13 +122,32 @@ That's it. `FInoOnnxModule::StartupModule` runs at
 DLL/.so is loaded and the `OrtApi` vtable is cached. A
 `OrtApi::GetAvailableProviders` smoke test at startup confirms the link.
 
-Consumer code:
-```cpp
-#include "InoOnnx.h"  // for InoAgents::Onnx::GetApi()
+Consumer code — pick one of two API levels:
 
-const OrtApi* Api = InoAgents::Onnx::GetApi();
+```cpp
+// Level 1: raw ORT C API. Maximum control; the original entry point
+// callers have used since the plugin was extracted from InoAgents.
+#include "InoOnnx.h"  // for InoOnnx::GetApi()
+
+const OrtApi* Api = InoOnnx::GetApi();
 if (Api == nullptr) { /* graceful fallback */ return; }
 // ... use Api->CreateSession etc.
+```
+
+```cpp
+// Level 2: generic C++ wrapper. Owned types, move-only RAII, dtype
+// safety, async runs. Use this for any new ORT integration unless
+// you specifically need raw-C-API control.
+#include "InoOnnxSession.h"
+#include "InoOnnxTensor.h"
+
+FInoOnnxSessionOptions Options;
+Options.ExecutionProviders = { EInoOnnxProvider::Cpu };  // or DirectMl, Nnapi, ...
+TUniquePtr<FInoOnnxSession> Session = FInoOnnxSession::Create(ModelPath, Options);
+if (!Session) { /* graceful fallback */ return; }
+
+TArray<FInoOnnxTensor> Outputs;
+Session->Run(Inputs, Outputs);
 ```
 
 The first and currently only consumer is `Plugins/InoAgents/`.
@@ -270,7 +312,12 @@ verifying — the matrix lives in InoAgents'
 - DirectML: https://github.com/microsoft/DirectML
 - ORT C API header (staged copy consumers `#include`):
   `Source/ThirdParty/Public/onnxruntime_c_api.h`
-- `OrtApi` accessor: `Source/InoOnnx/Public/InoOnnx.h` →
-  `InoAgents::Onnx::GetApi()`
+- Raw C API accessor: `Source/InoOnnx/Public/InoOnnx.h` →
+  `InoOnnx::GetApi()`
+- Generic C++ wrapper:
+  - `Source/InoOnnx/Public/Onnx/InoOnnxSession.h` → `FInoOnnxSession`
+  - `Source/InoOnnx/Public/Onnx/InoOnnxTensor.h`  → `FInoOnnxTensor`
+  - `Source/InoOnnx/Public/Onnx/InoOnnxTypes.h`   → `EInoOnnxDtype`,
+    `EInoOnnxProvider`, `FInoOnnxSessionOptions`, etc.
 - Pinned versions: `OnnxRuntime/ONNXRUNTIME_VERSION` and
   `OnnxRuntime/DIRECTML_VERSION`
