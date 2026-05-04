@@ -198,6 +198,15 @@ private:
         FString       Name;
         TArray<int64> Shape;        ///< may contain -1 for dynamic dims
         EInoOnnxDtype Dtype = EInoOnnxDtype::Undefined;
+
+        /**
+         * UTF-8 (null-terminated) representation of Name, kept alive for
+         * the session's lifetime. Run() reads from here instead of
+         * re-converting from FString every call. ORT's Run takes
+         * `const char**` for names, so caching as a stable const char*
+         * is the natural representation.
+         */
+        TArray<ANSICHAR> NameUtf8;
     };
 
     // Implementation lives in the .cpp; this header deliberately
@@ -208,6 +217,15 @@ private:
     TArray<FIOMeta>            InputMeta;
     TArray<FIOMeta>            OutputMeta;
     TArray<EInoOnnxProvider>   ActiveProviders;
+
+    /**
+     * Pre-cached `const char*` arrays into the FIOMeta::NameUtf8 buffers.
+     * Populated once in FinishConstruction; passed straight to OrtApi::Run
+     * so each inference avoids the FString -> UTF-8 conversion + tiny
+     * TArray allocs the per-call code used to do.
+     */
+    TArray<const char*> InputNamePtrs;
+    TArray<const char*> OutputNamePtrs;
 
     // Shared impl used by both Create overloads — takes a pre-allocated
     // session ptr and populates everything else. Returns false + error

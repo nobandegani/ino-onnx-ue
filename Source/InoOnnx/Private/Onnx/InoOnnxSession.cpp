@@ -780,6 +780,38 @@ bool FInoOnnxSession::FinishConstruction(
         }
     }
 
+    // Pre-cache UTF-8 representations of every input/output name and
+    // build the const-char* arrays Run() will hand to ORT verbatim.
+    // Two-pass: populate every NameUtf8 buffer first, then take pointers.
+    // (Pointers into a TArray<ANSICHAR> are stable until that TArray
+    // reallocates; we never modify NameUtf8 after this loop, and the
+    // FIOMeta entries themselves don't move because InputMeta /
+    // OutputMeta are past their Reserve+Add population step.)
+    auto BakeNameBuffers = [](TArray<FIOMeta>& Metas)
+    {
+        for (FIOMeta& Meta : Metas)
+        {
+            const FTCHARToUTF8 Conv(*Meta.Name);
+            const int32 ByteLen = Conv.Length();
+            Meta.NameUtf8.Reset(ByteLen + 1);
+            Meta.NameUtf8.Append(reinterpret_cast<const ANSICHAR*>(Conv.Get()), ByteLen);
+            Meta.NameUtf8.Add('\0');
+        }
+    };
+    BakeNameBuffers(InputMeta);
+    BakeNameBuffers(OutputMeta);
+
+    InputNamePtrs.Reset(InputMeta.Num());
+    for (const FIOMeta& Meta : InputMeta)
+    {
+        InputNamePtrs.Add(Meta.NameUtf8.GetData());
+    }
+    OutputNamePtrs.Reset(OutputMeta.Num());
+    for (const FIOMeta& Meta : OutputMeta)
+    {
+        OutputNamePtrs.Add(Meta.NameUtf8.GetData());
+    }
+
     UE_LOG(LogInoOnnx, Verbose,
            TEXT("Onnx: Session: metadata cache populated (%d inputs, %d outputs)"),
            InputMeta.Num(), OutputMeta.Num());
@@ -912,33 +944,14 @@ bool FInoOnnxSession::Run(
                *JoinShape(Inputs[i].GetShape()));
     }
 
-    // Build raw input arrays ORT wants:
-    //   const char** InputNames
-    //   const OrtValue** InputValues
-    //   const char** OutputNames
-    //   OrtValue**    OutputValues  (output — allocated and filled by Run)
-    TArray<const char*> InputNamesRaw;
-    TArray<FTCHARToUTF8> InputNameConverters;    // keep the utf-8 buffers alive
+    // Names come from the cached InputNamePtrs / OutputNamePtrs arrays
+    // baked at FinishConstruction time. The only per-Run allocation is
+    // for the input-OrtValue* array — small + cheap.
     TArray<const OrtValue*> InputValuesRaw;
-    InputNamesRaw.Reserve(InputMeta.Num());
-    InputNameConverters.Reserve(InputMeta.Num());
     InputValuesRaw.Reserve(Inputs.Num());
-
-    for (int32 i = 0; i < InputMeta.Num(); ++i)
+    for (int32 i = 0; i < Inputs.Num(); ++i)
     {
-        InputNameConverters.Emplace(*InputMeta[i].Name);
-        InputNamesRaw.Add(InputNameConverters.Last().Get());
         InputValuesRaw.Add(Inputs[i].GetNativeHandle());
-    }
-
-    TArray<const char*> OutputNamesRaw;
-    TArray<FTCHARToUTF8> OutputNameConverters;
-    OutputNamesRaw.Reserve(OutputMeta.Num());
-    OutputNameConverters.Reserve(OutputMeta.Num());
-    for (int32 i = 0; i < OutputMeta.Num(); ++i)
-    {
-        OutputNameConverters.Emplace(*OutputMeta[i].Name);
-        OutputNamesRaw.Add(OutputNameConverters.Last().Get());
     }
 
     TArray<OrtValue*> OutputValuesRaw;
@@ -951,11 +964,11 @@ bool FInoOnnxSession::Run(
     OrtStatus* Status = Api->Run(
         NativeSession,
         /*run_options=*/ nullptr,
-        InputNamesRaw.GetData(),
+        InputNamePtrs.GetData(),
         InputValuesRaw.GetData(),
         (size_t)InputValuesRaw.Num(),
-        OutputNamesRaw.GetData(),
-        (size_t)OutputNamesRaw.Num(),
+        OutputNamePtrs.GetData(),
+        (size_t)OutputNamePtrs.Num(),
         OutputValuesRaw.GetData());
 
     if (!CheckStatus(Status, TEXT("Run"), OutError))
