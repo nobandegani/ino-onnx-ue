@@ -183,13 +183,26 @@ If we shipped under default names, three things break:
    the cache. Our delay-load stub then binds to UE's DirectML version on
    first call, causing kernel-validation failures on fp16 attention and
    silent numerical corruption.
-3. **Android** — clang's linker at `libUnreal.so` build time resolves
-   `OrtGetApiBase` against whichever `libonnxruntime.so` it sees first
-   (often a Marketplace plugin's 1.19.2), recording a versioned symbol
-   reference `OrtGetApiBase@VERS_1.19.2`. At runtime our 1.24.3 .so
-   tagged `VERS_1.24.3` can't satisfy that, and the dynamic linker
-   aborts the process during `libUnreal.so` init — silently, before
-   UE's logger is up.
+3. **Android** — two failure modes, one at link time and one at load
+   time:
+   - **Link time**: clang's linker at `libUnreal.so` build time resolves
+     `OrtGetApiBase` against whichever `libonnxruntime.so` it sees first
+     (often a Marketplace plugin's 1.19.2), recording a versioned
+     symbol reference `OrtGetApiBase@VERS_1.19.2`. At runtime our 1.24.3
+     .so tagged `VERS_1.24.3` can't satisfy that, and the dynamic
+     linker aborts the process during `libUnreal.so` init — silently,
+     before UE's logger is up.
+   - **Load time / SONAME aliasing**: Android's dynamic linker dedupes
+     loaded libraries by `DT_SONAME` (the embedded ELF entry), NOT by
+     filename. Microsoft's onnxruntime-android AAR ships every ABI's
+     .so with `DT_SONAME = "libonnxruntime.so"`. Renaming only the
+     FILE to `libInoOnnxRuntime.so` leaves the SONAME unchanged, so if
+     any other plugin (e.g. RuntimeMetaHumanLipSync) loads a real
+     `libonnxruntime.so` first, the linker registers it under SONAME
+     `libonnxruntime.so` and our subsequent `dlopen("libInoOnnxRuntime.so")`
+     reads our file's SONAME, finds it already loaded, and **returns
+     the marketplace plugin's older handle**. `OrtApi::GetApi(24)` then
+     returns nullptr against that 1.19.x copy.
 
 The fix:
 
@@ -198,6 +211,13 @@ The fix:
 - **Patch** `InoOnnxRuntime.dll`'s PE delay-import table so its
   `DirectML.dll` reference becomes `InoDml.dll`. See
   `OnnxRuntime/scripts/patch-ort-dml-import.py`.
+- **Patch** the Android `.so`'s `DT_SONAME` to match the renamed
+  filename (`libInoOnnxRuntime.so`). File rename alone is insufficient
+  — see "Load time / SONAME aliasing" above. Done via
+  `OnnxRuntime/scripts/patch-ort-android-soname.py` (uses lief; one-time
+  `pip install lief` required). The new SONAME is longer than the
+  original, so unlike the Windows DML patch this needs a real ELF
+  editor that can extend the dynamic string table.
 - **Dynamic load only** — `InoOnnx.Build.cs` does NOT use
   `PublicAdditionalLibraries` or `PublicDelayLoadDLLs`. The runtime
   resolves `OrtGetApiBase` via `GetProcAddress` / `dlsym` on the renamed
@@ -206,7 +226,9 @@ The fix:
 
 The combined effect: `libUnreal.so` has zero `Ort*` symbol references,
 our `InoOnnxRuntime.dll`'s only delay-load DML target is `InoDml.dll`
-(a base name no other plugin owns), and base-name cache collisions
+(a base name no other plugin owns), our Android `.so` has a unique
+SONAME so it can't alias to a marketplace plugin's `libonnxruntime.so`,
+and both filename-cache (Windows) and SONAME-cache (Android) collisions
 become structurally impossible.
 
 ## How this relates to UE's NNE
@@ -243,8 +265,9 @@ The script is idempotent (safe to re-run). It:
    `DirectML.dll` → `InoDml.dll` in the delay-import table).
 6. Writes the version stamp.
 
-Python 3 + `pip install pefile` is required (one-time, for the patch
-script).
+Python 3 + `pip install pefile lief` is required (one-time):
+- `pefile` — for the Windows DML import-table patch.
+- `lief` — for the Android `.so` SONAME patch.
 
 ## Bumping the pin
 
@@ -296,6 +319,8 @@ verifying — the matrix lives in InoAgents'
   corporate networks, set `$env:HTTPS_PROXY` before running.
 - **`patch-ort-dml-import.py` fails**: ensure Python 3 is on PATH and
   `pip install pefile`.
+- **`patch-ort-android-soname.py` fails**: ensure Python 3 is on PATH
+  and `pip install lief`. Lief is a separate dependency from pefile.
 - **`Expand-Archive` says "file not found"**: AAR / NuGet files are
   zips in disguise. The script copies to `.zip` before extracting. If
   you see this on re-run, delete `OnnxRuntime/.cache/` and retry.

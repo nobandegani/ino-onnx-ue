@@ -383,13 +383,37 @@ Remove-Item -Path $AarAsZip -Force
 
 # AAR layout: jni/<abi>/libonnxruntime.so. We RENAME to libInoOnnxRuntime.so
 # when staging — same rationale as the Windows onnxruntime.dll rename.
-$ArmSoSrc = Join-Path $AndroidExtractDir "jni\arm64-v8a\libonnxruntime.so"
+#
+# IMPORTANT: a file rename alone is NOT sufficient on Android. Microsoft's
+# AAR ships the .so with DT_SONAME = "libonnxruntime.so" embedded inside
+# the ELF, and Android's dynamic linker dedupes loaded libraries by
+# SONAME — not by filename. If any other plugin in the same APK also
+# ships a libonnxruntime.so (e.g. RuntimeMetaHumanLipSync at ORT 1.19.2),
+# the linker's loaded-libraries cache aliases both files under the same
+# SONAME, and dlopen("libInoOnnxRuntime.so") returns whichever .so
+# loaded first. So we ALSO patch the SONAME inside the ELF via
+# patch-ort-android-soname.py (uses lief; pip install lief).
+$ArmSoSrc      = Join-Path $AndroidExtractDir "jni\arm64-v8a\libonnxruntime.so"
+$ArmSoStaged   = Join-Path $Arm64BinStageDir   "libInoOnnxRuntime.so"
+$ArmSoTargetSoname = "libInoOnnxRuntime.so"
 if (-not (Test-Path $ArmSoSrc)) {
     Write-Error "libonnxruntime.so not found at expected path inside AAR: $ArmSoSrc"
 }
 
-Copy-Item -Path $ArmSoSrc -Destination (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so") -Force
-Write-Host "  [STAGE] jni/arm64-v8a/libonnxruntime.so -> $Arm64BinStageDir\libInoOnnxRuntime.so (renamed for link-time version isolation)"
+Copy-Item -Path $ArmSoSrc -Destination $ArmSoStaged -Force
+Write-Host "  [STAGE] jni/arm64-v8a/libonnxruntime.so -> $ArmSoStaged (renamed for link-time version isolation)"
+
+# Patch DT_SONAME in-place so SONAME matches the new filename. Idempotent —
+# running the script after a successful patch is a no-op.
+$AndroidPatchScript = Join-Path $ScriptDir "patch-ort-android-soname.py"
+if (-not (Test-Path $AndroidPatchScript)) {
+    Write-Error "patch-ort-android-soname.py not found at $AndroidPatchScript"
+}
+Write-Host "  [PATCH] DT_SONAME -> $ArmSoTargetSoname"
+& python $AndroidPatchScript $ArmSoStaged $ArmSoStaged $ArmSoTargetSoname
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "patch-ort-android-soname.py failed (exit $LASTEXITCODE). Did you run 'pip install lief'?"
+}
 
 Write-Host ""
 
