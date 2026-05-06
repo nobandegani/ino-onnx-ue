@@ -282,11 +282,34 @@ namespace
         // CPU is always registered by ORT as the baseline, so even if
         // every requested provider fails, Run() still works — just
         // slower than it might have been.
+        //
+        // Defensive de-dup: ORT errors out on the second registration
+        // of the same provider with "Provider X has already been
+        // registered" and the whole session creation aborts — even
+        // though the user's *intent* (priority list) is satisfied by
+        // the first registration. Some callers thread provider lists
+        // through fallback chains and accidentally repeat an entry
+        // (e.g. [Xnnpack, Nnapi, Xnnpack, Cpu] where Xnnpack is also
+        // a fallback after NNAPI fails). Skip second-and-later
+        // appearances with a Verbose log instead of failing.
+        TSet<EInoOnnxProvider> SeenProviders;
         OutRegistered.Reset();
         for (const EInoOnnxProvider Provider : Options.ExecutionProviders)
         {
-            OrtStatus* RegStatus = nullptr;
             const TCHAR* ProviderName = ProviderToString(Provider);
+
+            bool bAlreadySeen = false;
+            SeenProviders.Add(Provider, &bAlreadySeen);
+            if (bAlreadySeen)
+            {
+                UE_LOG(LogInoOnnx, Verbose,
+                       TEXT("Onnx: Provider: %s appears more than once in the priority list; ")
+                       TEXT("skipping duplicate (ORT rejects re-registration of the same EP)."),
+                       ProviderName);
+                continue;
+            }
+
+            OrtStatus* RegStatus = nullptr;
 
             switch (Provider)
             {
