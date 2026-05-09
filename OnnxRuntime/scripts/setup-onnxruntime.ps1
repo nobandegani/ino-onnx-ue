@@ -108,13 +108,26 @@
 #
 #   Same defensive-isolation rename pattern as Win64 / Android, applied
 #   via patch-ort-apple.py (lief-based Mach-O LC_ID_DYLIB rewrite +
-#   plistlib Info.plist rewrite for the iOS frameworks):
-#     libonnxruntime.dylib   -> libInoOnnxRuntime.dylib
-#                               (LC_ID_DYLIB -> @rpath/libInoOnnxRuntime.dylib)
-#     onnxruntime.framework  -> InoOnnxRuntime.framework
-#                               (binary renamed onnxruntime -> InoOnnxRuntime,
-#                                LC_ID_DYLIB -> @rpath/InoOnnxRuntime.framework/InoOnnxRuntime,
-#                                CFBundleExecutable / CFBundleName / CFBundleIdentifier patched)
+#   plistlib Info.plist rewrite). Mac and iOS take different code paths
+#   inside the patcher because Microsoft ships them differently:
+#
+#     Mac (osx-arm64) — DYNAMIC dylib:
+#       libonnxruntime.dylib  -> libInoOnnxRuntime.dylib
+#                                (LC_ID_DYLIB -> @rpath/libInoOnnxRuntime.dylib)
+#
+#     iOS (xcframework slices) — STATIC framework (Apple convention):
+#       The "binary" inside onnxruntime.framework is actually a Unix
+#       `ar` static archive wrapped in a fat header, NOT a Mach-O dylib.
+#       The patcher detects the `!<arch>\n` magic, skips LC_ID_DYLIB
+#       rewrite (no install_name on a `.a`), and only renames the
+#       framework dir, the archive file, and Info.plist's CFBundle keys
+#       in lockstep so codesign accepts the result.
+#         onnxruntime.framework -> InoOnnxRuntime.framework
+#         onnxruntime           -> InoOnnxRuntime  (the static archive file)
+#         CFBundleExecutable / CFBundleName / CFBundleIdentifier patched
+#       At iOS link time the `-framework InoOnnxRuntime` flag pulls
+#       symbols straight into the iOS executable; nothing gets embedded
+#       in the .app bundle (Build.cs uses bCopyFramework=false).
 #
 #   Apple platforms don't have Windows' base-name DLL cache or Android's
 #   SONAME aliasing — dyld is stricter and looks up by full @rpath +

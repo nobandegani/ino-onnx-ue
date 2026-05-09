@@ -19,11 +19,14 @@
 #endif
 
 #if PLATFORM_IOS
-    // For dlsym(RTLD_DEFAULT, "OrtGetApiBase"). On iOS the framework is
-    // auto-loaded by dyld at app launch (declared via
-    // PublicAdditionalFrameworks in InoOnnx.Build.cs), so we never call
-    // GetDllHandle — we resolve OrtGetApiBase against the process's
-    // global namespace via dlsym instead.
+    // For dlsym(RTLD_DEFAULT, "OrtGetApiBase"). On iOS, Microsoft's
+    // ORT distribution is a STATIC FRAMEWORK (Unix `ar` archive wrapped
+    // in a fat header, NOT a Mach-O dylib). InoOnnx.Build.cs links it
+    // statically into the iOS executable via PublicAdditionalFrameworks
+    // with bCopyFramework=false, so by the time this Init runs every
+    // Ort* symbol is already in the main executable's global symbol
+    // table. dlsym(RTLD_DEFAULT, ...) finds it there. We never call
+    // GetDllHandle — there's no separate runtime dylib to open.
     #include <dlfcn.h>
 #endif
 
@@ -77,13 +80,14 @@ namespace
      *   because we're loading the dylib by full filesystem path, not by
      *   install-name lookup.
      *
-     * iOS: returns empty as a sentinel. The framework is auto-loaded by
-     *   dyld at app launch (PublicAdditionalFrameworks bCopyFramework=true
-     *   in InoOnnx.Build.cs), so there is no GetDllHandle step — Init()
-     *   detects the empty path and skips straight to symbol resolution
-     *   against RTLD_DEFAULT via dlsym. Calling dlopen on iOS would still
-     *   work for embedded frameworks but adds a per-init filesystem
-     *   lookup we don't need.
+     * iOS: returns empty as a sentinel. Microsoft's iOS ORT is a STATIC
+     *   FRAMEWORK — InoOnnx.Build.cs links it into the iOS executable
+     *   at build time (PublicAdditionalFrameworks with
+     *   bCopyFramework=false), so there's no separate runtime dylib to
+     *   load. Init() detects the empty path and skips straight to
+     *   symbol resolution against RTLD_DEFAULT via dlsym, which finds
+     *   the statically-linked Ort* symbols in the main executable's
+     *   global symbol table.
      */
     FString ResolveOnnxLibraryName()
     {
@@ -440,7 +444,9 @@ void* Init()
         return nullptr;
     }
 #else
-    // iOS path — framework already mapped by dyld, no GetDllHandle.
+    // iOS path — Ort* symbols are statically linked into the main
+    // executable (Microsoft ships ORT for iOS as a static framework;
+    // see InoOnnx.Build.cs's IOS branch). No GetDllHandle, no dlopen.
     // Sentinel handle (0x1) so the Shutdown path can distinguish
     // "successfully initialized on iOS" from "Init returned nullptr".
     // FreeDllHandle is never called on this sentinel; dlclose on
@@ -449,21 +455,23 @@ void* Init()
     {
         UE_LOG(LogInoOnnx, Warning,
                TEXT("Onnx: Module: iOS Init received non-empty LibName '%s'; ignoring ")
-               TEXT("(iOS uses auto-linked framework + RTLD_DEFAULT, not explicit dlopen)."),
+               TEXT("(iOS uses statically-linked framework + RTLD_DEFAULT, not explicit dlopen)."),
                *LibName);
     }
     UE_LOG(LogInoOnnx, Verbose,
-           TEXT("Onnx: Module: iOS — relying on dyld-loaded InoOnnxRuntime.framework; ")
-           TEXT("resolving OrtGetApiBase via dlsym(RTLD_DEFAULT)."));
+           TEXT("Onnx: Module: iOS — Ort* symbols statically linked from ")
+           TEXT("InoOnnxRuntime.framework; resolving OrtGetApiBase via dlsym(RTLD_DEFAULT)."));
 
     void* EntryPoint = dlsym(RTLD_DEFAULT, "OrtGetApiBase");
     if (EntryPoint == nullptr)
     {
         UE_LOG(LogInoOnnx, Error,
                TEXT("Onnx: Module: dlsym(RTLD_DEFAULT, \"OrtGetApiBase\") returned null. ")
-               TEXT("InoOnnxRuntime.framework was not auto-loaded by dyld — check that ")
-               TEXT("InoOnnx.Build.cs's PublicAdditionalFrameworks call is reaching the ")
-               TEXT("packaging stage and the framework was code-signed correctly."));
+               TEXT("Ort* symbols are not in the iOS executable's global namespace — check ")
+               TEXT("that InoOnnx.Build.cs's PublicAdditionalFrameworks call reached the link ")
+               TEXT("step. (Strip-unused-symbols passes can also remove OrtGetApiBase if no ")
+               TEXT("UE code reaches it via a non-static-link path; verify -ObjC / ")
+               TEXT("-force_load if you see this on a stripped Release build.)"));
         return nullptr;
     }
     void* Handle = reinterpret_cast<void*>(0x1);

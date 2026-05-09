@@ -242,23 +242,32 @@ public class InoOnnx : ModuleRules
 		}
 		else if (Target.Platform == UnrealTargetPlatform.IOS)
 		{
-			// iOS: PublicAdditionalFrameworks does double duty — adds
-			// `-framework InoOnnxRuntime` to the link command AND embeds
-			// InoOnnxRuntime.framework into the .app's Frameworks/
-			// directory at packaging time. dyld auto-loads the framework
-			// at app launch before any UE module runs, so by the time
-			// our StartupModule fires every Ort* symbol is already in
-			// the process's global namespace.
+			// iOS: Microsoft ships ORT for iOS as a STATIC FRAMEWORK —
+			// the binary inside InoOnnxRuntime.framework/ is a Unix `ar`
+			// archive (wrapped in a fat header), NOT a Mach-O dylib. This
+			// is Apple's "static framework" convention, common for
+			// security-sensitive code on iOS.
 			//
-			// Why this differs from Win64/Android/Mac dynamic-load pattern:
-			//   iOS has no reliable equivalent of dlopen-by-full-path that
-			//   works across all supported iOS versions + signing modes
-			//   (App Store, ad-hoc, dev). Embedded frameworks must be
-			//   declared at build time so the code-signing pass picks
-			//   them up. Our InoOnnx.cpp's iOS Init resolves OrtGetApiBase
-			//   via dlsym(RTLD_DEFAULT, ...) so the consumer-facing API
-			//   stays uniform across platforms; only the load mechanism
-			//   differs.
+			// PublicAdditionalFrameworks adds `-framework InoOnnxRuntime`
+			// to the iOS link command. Because the framework is static,
+			// every Ort* symbol the linker pulls ends up baked into the
+			// final iOS executable's binary — there is NO separate
+			// runtime dylib for dyld to load at app launch.
+			//
+			// bCopyFramework = false because nothing needs to be embedded
+			// in the .app/Frameworks/ directory. With a real dynamic
+			// framework we'd want true here so dyld can find the dylib at
+			// app launch; with a static archive there's no dylib + the
+			// archive's bytes are already linked into the main executable,
+			// so embedding would duplicate the code in the .ipa AND
+			// confuse code-signing (codesign expects a Mach-O dylib at
+			// the framework's binary path, not an `ar` archive).
+			//
+			// At runtime, InoOnnx.cpp resolves OrtGetApiBase via
+			// dlsym(RTLD_DEFAULT, ...) — for iOS that resolves against
+			// the main executable's global symbol table, which contains
+			// the statically-linked Ort* symbols. Same call site as Mac
+			// / Win64 / Android, different mechanism underneath.
 			//
 			// Staged by setup-onnxruntime.ps1 from the CPU NuGet:
 			//   runtimes/ios/native/onnxruntime.xcframework.zip (nested)
@@ -266,7 +275,8 @@ public class InoOnnx : ModuleRules
 			//     -> renamed end-to-end via patch-ort-apple.py:
 			//          - framework dir   onnxruntime.framework -> InoOnnxRuntime.framework
 			//          - binary name     onnxruntime           -> InoOnnxRuntime
-			//          - LC_ID_DYLIB     -> @rpath/InoOnnxRuntime.framework/InoOnnxRuntime
+			//          - LC_ID_DYLIB     skipped — static `ar` archive has
+			//                            no install_name to patch
 			//          - Info.plist      CFBundleExecutable / Name / Identifier
 			//
 			// Currently we only ship the device slice (arm64). The
@@ -282,7 +292,7 @@ public class InoOnnx : ModuleRules
 					"InoOnnxRuntime",
 					IosFwDir,
 					/*CopyBundledAssets*/ null,
-					/*bCopyFramework*/ true));
+					/*bCopyFramework*/ false));
 			}
 		}
 		// Linux: not yet implemented. Linking succeeds because no static

@@ -81,17 +81,127 @@ EXPECTED_BUNDLE_ID_PREFIX = "com.microsoft.onnxruntime"
 #  Mach-O LC_ID_DYLIB rewrite
 # ============================================================================
 
+# Magic bytes for the various Apple binary container formats we care about.
+# Used by _detect_apple_binary_kind to distinguish a Mach-O dylib (which has
+# an LC_ID_DYLIB to patch) from a Unix `ar` static archive (which doesn't —
+# Microsoft ships their iOS xcframework as static archives wrapped in fat
+# headers, and patching them is a no-op).
+MACHO_MAGICS = {
+    b"\xCA\xFE\xBA\xBE",  # FAT_MAGIC (32-bit offsets, big-endian)
+    b"\xCA\xFE\xBA\xBF",  # FAT_MAGIC_64 (64-bit offsets, big-endian)
+    b"\xFE\xED\xFA\xCE",  # MH_MAGIC (32-bit Mach-O, big-endian)
+    b"\xCE\xFA\xED\xFE",  # MH_CIGAM (32-bit Mach-O, little-endian)
+    b"\xFE\xED\xFA\xCF",  # MH_MAGIC_64 (64-bit Mach-O, big-endian)
+    b"\xCF\xFA\xED\xFE",  # MH_CIGAM_64 (64-bit Mach-O, little-endian)
+}
+AR_MAGIC = b"!<arch>\n"  # Unix `ar` archive (sometimes wrapped in fat header)
+
+
+def _detect_apple_binary_kind(path: str) -> str:
+    """Sniff the first ~64 bytes of `path` and return one of:
+       'macho'        — Mach-O dylib / executable / fat-with-Mach-O slices.
+                        LC_ID_DYLIB patching applies.
+       'static_ar'    — Unix `ar` archive (with or without an outer fat
+                        header). LC_ID_DYLIB patching is a no-op (no
+                        install_name on static archives); caller should
+                        skip it. Microsoft ships iOS xcframework slices as
+                        these — iOS static frameworks per Apple convention.
+       'unknown'     — neither; caller should error out.
+    """
+    with open(path, "rb") as f:
+        head = f.read(64)
+    if len(head) < 8:
+        return "unknown"
+
+    magic = bytes(head[:4])
+    # Direct Mach-O — easy case.
+    if magic in MACHO_MAGICS - {b"\xCA\xFE\xBA\xBE", b"\xCA\xFE\xBA\xBF"}:
+        return "macho"
+    # Direct Unix `ar` archive (no fat wrapper). Rare for Apple frameworks
+    # but possible.
+    if head.startswith(AR_MAGIC):
+        return "static_ar"
+
+    # Fat header — peek inside the first slice to see if it's Mach-O or `ar`.
+    # Fat header layout (big-endian):
+    #   uint32 magic
+    #   uint32 nfat_arch
+    # then nfat_arch entries of:
+    #   uint32 cputype, cpusubtype, offset, size, align
+    # FAT_MAGIC_64 has a 64-bit offset/size variant. We only need the
+    # offset of slice 0 to peek at its magic.
+    if magic == b"\xCA\xFE\xBA\xBE":
+        # 32-bit fat. Slice 0 offset at byte 16 (after 8-byte fat_header +
+        # 8 bytes of cputype/cpusubtype).
+        if len(head) < 24:
+            return "unknown"
+        slice_off = int.from_bytes(head[16:20], "big")
+    elif magic == b"\xCA\xFE\xBA\xBF":
+        # 64-bit fat. Slice 0 offset at byte 16 (after 8-byte fat_header +
+        # 8 bytes cputype/cpusubtype) but offset is 8 bytes wide.
+        if len(head) < 32:
+            return "unknown"
+        slice_off = int.from_bytes(head[16:24], "big")
+    else:
+        return "unknown"
+
+    # Read 8 bytes at the slice offset to identify it.
+    with open(path, "rb") as f:
+        f.seek(slice_off)
+        slice_head = f.read(8)
+    if len(slice_head) < 8:
+        return "unknown"
+    if slice_head.startswith(AR_MAGIC):
+        return "static_ar"
+    if bytes(slice_head[:4]) in MACHO_MAGICS:
+        return "macho"
+    return "unknown"
+
+
 def _patch_dylib_id(input_path: str, output_path: str, new_install_name: str) -> None:
     """Rewrite the LC_ID_DYLIB install_name of every slice in a Mach-O
     binary to `new_install_name`. Handles both single-arch (arm64 only)
     and fat (arm64 + x86_64) Mach-O files transparently.
 
+    For static-archive frameworks (Apple's iOS convention — a fat-wrapped
+    Unix `ar` archive instead of a real dylib), this function copies the
+    file unchanged: there is no install_name on a `.a` to patch.
+    Microsoft's ORT iOS xcframework ships this way; their osx-arm64 macOS
+    NuGet entry is a real dylib and gets the patch.
+
     LC_LOAD_DYLIB references inside the binary are NOT touched — those
-    point at OS / framework dependencies (libSystem, etc.) and renaming
-    them would break loading.
+    point at OS / framework dependencies (libSystem, CoreML, Metal, etc.)
+    and renaming them would break loading.
     """
     if not os.path.exists(input_path):
         sys.exit(f"ERROR: input Mach-O not found: {input_path}")
+
+    kind = _detect_apple_binary_kind(input_path)
+    if kind == "unknown":
+        sys.exit(
+            f"ERROR: {input_path} is neither a Mach-O nor a Unix `ar` "
+            f"archive — first 4 bytes don't match any known magic."
+        )
+
+    if kind == "static_ar":
+        # iOS static framework — nothing to patch in the binary itself.
+        # The framework rename (dir + binary file + Info.plist) is what
+        # makes the static framework act under our renamed identity at
+        # link time; the static archive's internal `.o` symbol table has
+        # no recorded "install_name" or framework-name reference.
+        print(
+            f"  static `ar` archive detected — skipping LC_ID_DYLIB patch "
+            f"(iOS static framework convention)."
+        )
+        # Copy unchanged so the caller's pipeline doesn't break on a
+        # missing output.
+        if os.path.abspath(input_path) != os.path.abspath(output_path):
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            if output_dir and not os.path.isdir(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+            shutil.copyfile(input_path, output_path)
+            print(f"  copied static archive to {output_path}")
+        return
 
     parsed = lief.MachO.parse(input_path)
     if parsed is None:
@@ -112,10 +222,16 @@ def _patch_dylib_id(input_path: str, output_path: str, new_install_name: str) ->
     )
 
     for i, sl in enumerate(slices):
-        # Find the LC_ID_DYLIB load command. lief exposes it via
-        # binary.dylib_id (returns None if absent — bundle / executable
-        # Mach-Os; dylibs always have one).
-        dylib_id = sl.dylib_id
+        # Find the LC_ID_DYLIB load command. lief 0.13+ doesn't expose a
+        # `binary.dylib_id` shortcut — we iterate `sl.commands` looking
+        # for the entry whose `.command` enum is `ID_DYLIB`. (LC_LOAD_DYLIB
+        # entries reference dependency dylibs and we don't touch those.)
+        dylib_id = None
+        for cmd in sl.commands:
+            if cmd.command == lief.MachO.LoadCommand.TYPE.ID_DYLIB:
+                dylib_id = cmd
+                break
+
         if dylib_id is None:
             sys.exit(
                 f"ERROR: slice {i} of {input_path} has no LC_ID_DYLIB "
@@ -132,8 +248,9 @@ def _patch_dylib_id(input_path: str, output_path: str, new_install_name: str) ->
 
         dylib_id.name = new_install_name
 
-        # lief's CPU-type field is exposed differently across versions;
-        # try both attribute paths for nicer logging without erroring out.
+        # CPU-type label for nicer fat-binary diagnostics. lief exposes
+        # this on the Mach-O header; the attr path has shifted between
+        # versions, so guard against AttributeError.
         cpu_label = "?"
         try:
             cpu_label = str(sl.header.cpu_type).rsplit(".", 1)[-1]

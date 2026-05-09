@@ -83,11 +83,14 @@ private:
  *   - GetDllExport("OrtGetApiBase") via dlsym, then caches OrtApi*.
  *
  * Init() on iOS:
- *   - InoOnnxRuntime.framework is auto-loaded by dyld at app launch
- *     (declared via PublicAdditionalFrameworks in InoOnnx.Build.cs), so
- *     OrtGetApiBase is in the process's global symbol namespace by the
- *     time this Init() runs. Skips GetDllHandle entirely; resolves
- *     OrtGetApiBase via dlsym(RTLD_DEFAULT, ...) instead, returns a
+ *   - Microsoft ships ORT for iOS as a STATIC FRAMEWORK — the binary
+ *     inside InoOnnxRuntime.framework is a Unix `ar` archive (Apple's
+ *     "static framework" convention), NOT a Mach-O dylib. Build.cs
+ *     links it statically into the iOS executable via
+ *     PublicAdditionalFrameworks with bCopyFramework=false, so by the
+ *     time Init() runs every Ort* symbol is already in the main
+ *     executable's global symbol table. Skips GetDllHandle entirely;
+ *     resolves OrtGetApiBase via dlsym(RTLD_DEFAULT, ...), returns a
  *     0x1 sentinel handle so Shutdown can distinguish "initialized"
  *     from "Init returned nullptr". FreeDllHandle is never called on
  *     the sentinel.

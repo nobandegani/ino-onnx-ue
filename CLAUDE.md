@@ -178,7 +178,7 @@ The first and currently only consumer is `Plugins/InoAgents/`.
 | **Windows (Win64)**      | ✅ shipping   | `InoOnnxRuntime.dll` + `InoDml.dll` + `onnxruntime_providers_shared.dll`. EPs: CPU + DirectML. |
 | **Android (arm64-v8a)**  | ✅ shipping   | `libInoOnnxRuntime.so` (single .so). EPs: CPU + XNNPACK + NNAPI + WebGPU. |
 | **macOS (arm64)**        | ✅ shipping   | `libInoOnnxRuntime.dylib` (Apple Silicon only — Microsoft drops Intel Mac in modern ORT NuGets). EPs: CPU + CoreML. |
-| **iOS (arm64 device)**   | ✅ shipping   | `InoOnnxRuntime.framework` (renamed from `onnxruntime.framework`, embedded via `PublicAdditionalFrameworks`). EPs: CPU + CoreML + XNNPACK. |
+| **iOS (arm64 device)**   | ✅ shipping   | `InoOnnxRuntime.framework` containing a Unix `ar` **static archive** (Apple "static framework" convention). Linked via `PublicAdditionalFrameworks` with `bCopyFramework=false` — Ort* symbols end up in the iOS executable's main binary, no separate dylib at runtime. EPs: CPU + CoreML + XNNPACK. |
 | **iOS Simulator**        | ⚙️ staged     | Framework staged at `Source/ThirdParty/IOS/Simulator/InoOnnxRuntime.framework/` (arm64+x86_64 fat) for dev iteration in Xcode simulator, but `InoOnnx.Build.cs` only wires the device slice into shipped iOS builds. Flip the framework path or branch on `Target.Architecture` if you need simulator. |
 | Linux                    | ⏳ not staged | No prebuilt download; consumers' `OrtApi*` is null on this platform. |
 
@@ -241,19 +241,31 @@ The fix:
   original, so unlike the Windows DML patch this needs a real ELF
   editor that can extend the dynamic string table.
 - **Patch** the Mac dylib's `LC_ID_DYLIB` install_name to
-  `@rpath/libInoOnnxRuntime.dylib` and the iOS framework end-to-end
-  (rename framework dir + binary, patch LC_ID_DYLIB to
-  `@rpath/InoOnnxRuntime.framework/InoOnnxRuntime`, rewrite Info.plist's
-  `CFBundleExecutable` / `CFBundleName` / `CFBundleIdentifier`). Done
-  via `OnnxRuntime/scripts/patch-ort-apple.py` (lief Mach-O editor +
-  Python's stdlib `plistlib`). Apple platforms don't have Windows'
-  base-name DLL cache or Android's SONAME aliasing — dyld looks up by
-  full @rpath + LC_ID_DYLIB install_name — so collision risk is much
-  lower here than on those two platforms. We rename anyway for
-  defence-in-depth + naming consistency, and because Apple's
-  code-signing rejects framework-name / Info.plist mismatches at
-  packaging time (so once we rename the binary we MUST also patch the
-  plist to match).
+  `@rpath/libInoOnnxRuntime.dylib`. Done via
+  `OnnxRuntime/scripts/patch-ort-apple.py --mode dylib` (lief Mach-O
+  editor). Mac is a real Mach-O dylib so the install_name can be
+  rewritten in place.
+- **Rename** the iOS framework end-to-end — framework dir
+  `onnxruntime.framework` → `InoOnnxRuntime.framework`, binary file
+  `onnxruntime` → `InoOnnxRuntime`, plus rewriting Info.plist's
+  `CFBundleExecutable` / `CFBundleName` / `CFBundleIdentifier`. Done
+  via `patch-ort-apple.py --mode framework` (lief + stdlib `plistlib`).
+  **The iOS framework binary is NOT a Mach-O dylib** — Microsoft ships
+  ORT for iOS as a Unix `ar` static archive (wrapped in a fat header)
+  per Apple's "static framework" convention. The patcher detects the
+  `!<arch>\n` magic and skips the LC_ID_DYLIB rewrite — there's no
+  install_name on a static archive to patch — but the framework dir +
+  binary file rename and the Info.plist rewrite are still required so
+  Apple's codesign accepts the renamed bundle.
+
+  Apple platforms don't have Windows' base-name DLL cache or Android's
+  SONAME aliasing — dyld looks up by full @rpath + LC_ID_DYLIB
+  install_name on dynamic libraries, and static archives don't even
+  have a runtime presence — so collision risk is much lower here than
+  on those two platforms. We rename anyway for defence-in-depth +
+  naming consistency, and because Apple's code-signing rejects
+  framework-name / Info.plist mismatches at packaging time (so once we
+  rename the binary we MUST also patch the plist to match).
 - **Dynamic load only** (Win64 / Android / Mac) — `InoOnnx.Build.cs`
   does NOT use `PublicAdditionalLibraries` or `PublicDelayLoadDLLs` on
   these platforms. The runtime resolves `OrtGetApiBase` via
@@ -261,15 +273,18 @@ The fix:
   everything through the returned `OrtApi*` vtable. No static-linker
   reference to ORT exists in `libUnreal.so` / `libUnreal.dylib`.
 
-**iOS is the exception** — `PublicAdditionalFrameworks` does double
-duty (adds `-framework InoOnnxRuntime` to the link command AND embeds
-`InoOnnxRuntime.framework` into the `.app`'s `Frameworks/` directory at
-packaging time). iOS has no reliable equivalent of `dlopen`-by-full-path
-that works across all supported iOS versions and signing modes (App
-Store, ad-hoc, dev). The framework is auto-loaded by dyld at app launch
-before any UE module runs; `InoOnnx.cpp`'s iOS Init resolves
-`OrtGetApiBase` via `dlsym(RTLD_DEFAULT, ...)` so the consumer-facing
-API stays uniform across platforms — only the load mechanism differs.
+**iOS is the exception** — `PublicAdditionalFrameworks` adds
+`-framework InoOnnxRuntime` to the iOS link command. Because the
+framework wraps a static archive (see "Patch / Rename" above), the
+linker pulls Ort* symbols straight into the iOS executable's main
+binary; there's no runtime dylib for dyld to load. We pass
+`bCopyFramework=false` so nothing gets duplicated into
+`<App>.app/Frameworks/` (which would also confuse codesign — codesign
+expects a Mach-O at the framework's binary path, not an `ar` archive).
+At runtime, `InoOnnx.cpp`'s iOS Init resolves `OrtGetApiBase` via
+`dlsym(RTLD_DEFAULT, ...)`, which finds the statically-linked symbol
+in the main executable's global namespace. Same call site as Win64 /
+Android / Mac, different mechanism underneath.
 
 The combined effect (Win64 / Android / Mac): `libUnreal.so` /
 `libUnreal.dylib` has zero `Ort*` symbol references, our
@@ -280,8 +295,9 @@ Mac dylib has a unique `LC_ID_DYLIB` install_name and lives at a
 unique path under `Source/ThirdParty/Mac/`, and filename-cache
 (Windows), SONAME-cache (Android), and dyld-cache (Mac) collisions
 become structurally impossible. iOS dodges the whole question by
-having dyld pre-load the framework at app launch — there is nothing
-for our code to load or alias.
+shipping as a static archive — Ort* symbols are baked into the iOS
+executable at link time, so there is no runtime dylib for caches to
+alias and no second copy to fight with.
 
 ## How this relates to UE's NNE
 
