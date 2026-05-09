@@ -60,10 +60,11 @@ enum class EInoOnnxDtype : uint8
  * Cpu is always available (ORT's reference implementation).
  * Xnnpack is always available on arm64 and typically on x86_64 too
  * (ships with every ORT build we've looked at).
- * Nnapi / WebGpu / DirectMl / Cuda / TensorRt are available only on
- * specific platforms and specific ORT builds — if a caller requests
- * one that isn't registered in the current ORT runtime, we silently
- * skip it and fall through to the next entry in the priority list.
+ * Nnapi / WebGpu / DirectMl / CoreMl / Cuda / TensorRt are available
+ * only on specific platforms and specific ORT builds — if a caller
+ * requests one that isn't registered in the current ORT runtime, we
+ * silently skip it and fall through to the next entry in the priority
+ * list.
  *
  * The enum order here is also the RECOMMENDED priority for a generic
  * workload on each platform — put your preferred accelerator first.
@@ -78,6 +79,7 @@ enum class EInoOnnxProvider : uint8
     Nnapi     UMETA(DisplayName = "NNAPI"),       ///< Android Neural Networks API (vendor NPU/GPU/DSP); Android only
     WebGpu    UMETA(DisplayName = "WebGPU"),      ///< ONNX WebGPU provider (GPU compute); Android + future Windows
     DirectMl  UMETA(DisplayName = "DirectML"),    ///< Windows GPU via D3D12 (matches UE's renderer); Windows only
+    CoreMl    UMETA(DisplayName = "CoreML"),      ///< Apple CoreML (CPU/GPU/ANE on Apple Silicon); macOS + iOS only
     Cuda      UMETA(DisplayName = "CUDA"),        ///< NVIDIA CUDA; Windows / Linux with CUDA toolkit
     TensorRt  UMETA(DisplayName = "TensorRT"),    ///< NVIDIA TensorRT (on top of CUDA); Windows / Linux, NVIDIA only
 };

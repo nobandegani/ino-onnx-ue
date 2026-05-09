@@ -2,12 +2,16 @@
 #
 # One-time setup (idempotent) for the InoOnnx plugin.
 #
-# Downloads Microsoft's prebuilt ONNX Runtime binaries for Win64 and Android
-# arm64-v8a, stages everything (headers + DLLs/.so) under a flat tree:
+# Downloads Microsoft's prebuilt ONNX Runtime binaries for Win64, Android
+# arm64-v8a, macOS (Apple Silicon), and iOS (device + simulator), stages
+# everything (headers + DLLs/.so/.dylib/.framework) under a flat tree:
 #   Plugins/InoOnnx/Source/ThirdParty/
 #     Public/                          C / C++ API headers
 #     Win64/                           InoOnnxRuntime.dll, InoDml.dll, providers_shared
 #     Android/arm64-v8a/               libInoOnnxRuntime.so
+#     Mac/                             libInoOnnxRuntime.dylib (Apple Silicon arm64)
+#     IOS/InoOnnxRuntime.framework/    iOS device (arm64)
+#     IOS/Simulator/InoOnnxRuntime.framework/ iOS simulator (arm64 + x86_64 fat)
 #
 # Pinned versions live in two files:
 #   Plugins/InoOnnx/OnnxRuntime/ONNXRUNTIME_VERSION   (e.g. "1.24.3")
@@ -61,8 +65,15 @@
 #   Enterprise AV on a dev machine may occasionally flag "MS-signed DLL
 #   with broken signature" — documented as a known caveat.
 #
-# Python + pefile dependency:
-#   The patch script needs Python 3 on PATH and `pip install pefile`.
+# Python dependencies (one-time, all pure-Python):
+#   pefile  — Windows DML import-table patch (patch-ort-dml-import.py)
+#   lief    — Android SONAME + Apple Mach-O LC_ID_DYLIB patches
+#             (patch-ort-android-soname.py, patch-ort-apple.py)
+#   plistlib — iOS framework Info.plist rewrite (Python stdlib; no install)
+#
+#   pip install pefile lief
+#
+# Required once before first run; stays installed for subsequent runs.
 #   Run once before first setup; stays installed for subsequent runs.
 #
 # Why no GPU mega-bundle / CUDA:
@@ -80,6 +91,37 @@
 #   Windows rename dodged; see the original-file comments below preserved
 #   from Phase 4.
 #
+# Mac + iOS (sourced from the regular Microsoft.ML.OnnxRuntime CPU NuGet —
+# NOT the DirectML variant; DML is Windows-only):
+#   The CPU NuGet ships:
+#     runtimes/osx-arm64/native/libonnxruntime.dylib    (Apple Silicon Mac)
+#     runtimes/ios/native/onnxruntime.xcframework.zip   (nested zip)
+#   The inner xcframework contains three slices we care about:
+#     ios-arm64/onnxruntime.framework/                  (iOS device — arm64)
+#     ios-arm64_x86_64-simulator/onnxruntime.framework/ (iOS simulator — fat)
+#   (A maccatalyst slice exists too; we ignore it — Mac Catalyst isn't a
+#    UE 5.7 target.)
+#
+#   Microsoft does not ship Intel-Mac (osx-x64) or universal2 binaries
+#   in modern ORT NuGets — only Apple Silicon. Intel Macs would need a
+#   GitHub-Releases osx-x86_64 tarball; not staged today.
+#
+#   Same defensive-isolation rename pattern as Win64 / Android, applied
+#   via patch-ort-apple.py (lief-based Mach-O LC_ID_DYLIB rewrite +
+#   plistlib Info.plist rewrite for the iOS frameworks):
+#     libonnxruntime.dylib   -> libInoOnnxRuntime.dylib
+#                               (LC_ID_DYLIB -> @rpath/libInoOnnxRuntime.dylib)
+#     onnxruntime.framework  -> InoOnnxRuntime.framework
+#                               (binary renamed onnxruntime -> InoOnnxRuntime,
+#                                LC_ID_DYLIB -> @rpath/InoOnnxRuntime.framework/InoOnnxRuntime,
+#                                CFBundleExecutable / CFBundleName / CFBundleIdentifier patched)
+#
+#   Apple platforms don't have Windows' base-name DLL cache or Android's
+#   SONAME aliasing — dyld is stricter and looks up by full @rpath +
+#   LC_ID_DYLIB install_name — so collision risk is much lower here than
+#   on those two platforms. We rename anyway for defence-in-depth + naming
+#   consistency with the Win64 / Android rename pattern.
+#
 # Artifacts on disk after this runs (assuming ORT 1.24.3 + DML 1.15.4):
 #
 #   Source/ThirdParty/
@@ -90,6 +132,14 @@
 #       onnxruntime_providers_shared.dll   (~200 KB, original name)
 #     Android/arm64-v8a/
 #       libInoOnnxRuntime.so               (~25 MB, CPU + XNNPACK)
+#     Mac/
+#       libInoOnnxRuntime.dylib            (~12 MB, Apple Silicon CPU + CoreML)
+#     IOS/InoOnnxRuntime.framework/
+#       InoOnnxRuntime                     (~14 MB, iOS device CPU + CoreML)
+#       Info.plist + Headers/
+#     IOS/Simulator/InoOnnxRuntime.framework/
+#       InoOnnxRuntime                     (~28 MB, fat arm64+x86_64 simulator)
+#       Info.plist + Headers/
 
 $ErrorActionPreference = "Stop"
 
@@ -108,10 +158,22 @@ $CacheDir     = Join-Path $OnnxRtDir ".cache"
 # Note there is no Win64 "lib" directory — dynamic loading (GetProcAddress
 # on the renamed DLL) means we never link against the ORT import library
 # at UE build time.
-$ThirdPartyDir    = Join-Path $PluginDir "Source\ThirdParty"
-$PublicIncDir     = Join-Path $ThirdPartyDir "Public"
-$Win64BinStageDir = Join-Path $ThirdPartyDir "Win64"
-$Arm64BinStageDir = Join-Path $ThirdPartyDir "Android\arm64-v8a"
+$ThirdPartyDir       = Join-Path $PluginDir "Source\ThirdParty"
+$PublicIncDir        = Join-Path $ThirdPartyDir "Public"
+$Win64BinStageDir    = Join-Path $ThirdPartyDir "Win64"
+$Arm64BinStageDir    = Join-Path $ThirdPartyDir "Android\arm64-v8a"
+# macOS — Apple Silicon only (Microsoft drops Intel Mac in modern ORT NuGets).
+# Flat dylib at the Mac/ root; no .framework wrapper needed for executable
+# bundles. UE's Mac packaging copies the dylib next to the binary at cook time.
+$MacStageDir         = Join-Path $ThirdPartyDir "Mac"
+# iOS — split into device + simulator slices, each in its own renamed
+# .framework dir (PublicAdditionalFrameworks expects framework dirs, not
+# loose dylibs). Device slice is what ships in App Store builds; simulator
+# slice exists for dev convenience and is currently NOT wired into Build.cs.
+$IosStageRoot        = Join-Path $ThirdPartyDir "IOS"
+$IosFrameworkDir     = Join-Path $IosStageRoot "InoOnnxRuntime.framework"
+$IosSimStageRoot     = Join-Path $IosStageRoot "Simulator"
+$IosSimFrameworkDir  = Join-Path $IosSimStageRoot "InoOnnxRuntime.framework"
 
 #---------------------------------------------------------------------
 # 1. Load pinned versions
@@ -165,6 +227,13 @@ $AndroidAarName = "onnxruntime-android-$Version.aar"
 $AndroidAarUrl  = "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$Version/$AndroidAarName"
 $AndroidAarPath = Join-Path $CacheDir $AndroidAarName
 
+# Mac + iOS: the regular Microsoft.ML.OnnxRuntime CPU NuGet ships
+# osx-arm64 + ios xcframework. (The DML NuGet we use for Win64 has only
+# Windows artifacts; the CPU NuGet has every other platform.)
+$OrtCpuNupkgName = "Microsoft.ML.OnnxRuntime.$Version.nupkg"
+$OrtCpuNupkgUrl  = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/$Version"
+$OrtCpuNupkgPath = Join-Path $CacheDir $OrtCpuNupkgName
+
 #---------------------------------------------------------------------
 # 3. Idempotency: if staged binaries already match both versions, skip
 #---------------------------------------------------------------------
@@ -176,7 +245,10 @@ $ExpectedStamp = "$Version+$DmlVersion"
 if ((Test-Path $StampFile) -and `
     (Test-Path (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll")) -and `
     (Test-Path (Join-Path $Win64BinStageDir "InoDml.dll")) -and `
-    (Test-Path (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so"))) {
+    (Test-Path (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so")) -and `
+    (Test-Path (Join-Path $MacStageDir "libInoOnnxRuntime.dylib")) -and `
+    (Test-Path (Join-Path $IosFrameworkDir "InoOnnxRuntime")) -and `
+    (Test-Path (Join-Path $IosSimFrameworkDir "InoOnnxRuntime"))) {
     $StampValue = (Get-Content $StampFile -Raw).Trim()
     if ($StampValue -eq $ExpectedStamp) {
         Write-Host "--- Already up to date ---" -ForegroundColor Green
@@ -196,7 +268,8 @@ if ((Test-Path $StampFile) -and `
 # all zips in disguise; Expand-Archive handles them once we have a .zip
 # extension on disk.
 
-foreach ($d in @($CacheDir, $PublicIncDir, $Win64BinStageDir, $Arm64BinStageDir)) {
+foreach ($d in @($CacheDir, $PublicIncDir, $Win64BinStageDir, $Arm64BinStageDir,
+                 $MacStageDir, $IosStageRoot, $IosSimStageRoot)) {
     if (-not (Test-Path $d)) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
     }
@@ -242,6 +315,7 @@ Write-Host "--- Downloading artifacts ---" -ForegroundColor Yellow
 Download-IfMissing -Url $OrtNupkgUrl     -Dest $OrtNupkgPath     -Label "ORT DirectML NuGet"     -MinSizeMb 10
 Download-IfMissing -Url $DmlNupkgUrl     -Dest $DmlNupkgPath     -Label "DirectML NuGet"         -MinSizeMb 100
 Download-IfMissing -Url $AndroidAarUrl   -Dest $AndroidAarPath   -Label "Android AAR"            -MinSizeMb 5
+Download-IfMissing -Url $OrtCpuNupkgUrl  -Dest $OrtCpuNupkgPath  -Label "ORT CPU NuGet (Mac+iOS)" -MinSizeMb 5
 Write-Host ""
 
 #---------------------------------------------------------------------
@@ -418,18 +492,143 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 
 #---------------------------------------------------------------------
-# 9. Write version stamp
+# 9. Extract + stage macOS + iOS (regular CPU NuGet)
+#---------------------------------------------------------------------
+# The DirectML NuGet we used above ships only Windows artifacts. The
+# regular Microsoft.ML.OnnxRuntime CPU NuGet ships every other platform
+# Microsoft supports — we extract two from it:
+#   runtimes/osx-arm64/native/libonnxruntime.dylib    (Apple Silicon Mac)
+#   runtimes/ios/native/onnxruntime.xcframework.zip   (iOS, nested zip)
+#
+# Each goes through patch-ort-apple.py (lief-based) for the rename.
+Write-Host "--- Extracting + staging macOS + iOS ORT ---" -ForegroundColor Yellow
+
+$ApplePatchScript = Join-Path $ScriptDir "patch-ort-apple.py"
+if (-not (Test-Path $ApplePatchScript)) {
+    Write-Error "patch-ort-apple.py not found at $ApplePatchScript"
+}
+
+$OrtCpuExtractDir = Join-Path $CacheDir "ort-cpu-extract-$Version"
+Expand-Nupkg -NupkgPath $OrtCpuNupkgPath -DestDir $OrtCpuExtractDir -Label "ORT CPU NuGet"
+
+# ---- Mac (Apple Silicon dylib) ----
+# Microsoft does not ship Intel-Mac (osx-x64) or universal2 in modern ORT
+# NuGets — only osx-arm64. If a future need for Intel Mac arises, point
+# this at the GitHub-Releases osx-x86_64 tarball and lipo/-merge with the
+# arm64 dylib into a universal2 binary.
+$MacDylibSrc = Join-Path $OrtCpuExtractDir "runtimes\osx-arm64\native\libonnxruntime.dylib"
+if (-not (Test-Path $MacDylibSrc)) {
+    Write-Error "Expected Mac dylib at $MacDylibSrc inside the CPU NuGet (Microsoft may have changed the runtimes/ layout)."
+}
+
+$MacDylibStaged = Join-Path $MacStageDir "libInoOnnxRuntime.dylib"
+$MacInstallName = "@rpath/libInoOnnxRuntime.dylib"
+Write-Host "  [PATCH] Mac dylib: install_name -> $MacInstallName"
+& python $ApplePatchScript --mode dylib `
+    --input $MacDylibSrc `
+    --output $MacDylibStaged `
+    --install-name $MacInstallName
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "patch-ort-apple.py (dylib mode) failed (exit $LASTEXITCODE). Did you 'pip install lief'?"
+}
+$MacSizeMb = [math]::Round((Get-Item $MacDylibStaged).Length / 1MB, 1)
+Write-Host "  [STAGE] libInoOnnxRuntime.dylib ($MacSizeMb MB) -> $MacDylibStaged"
+
+# ---- iOS (xcframework, nested zip inside the NuGet) ----
+# Extract the inner zip into a scratch dir; then run patch-ort-apple.py
+# in framework mode against the device + simulator slices.
+$IosXcfZipSrc = Join-Path $OrtCpuExtractDir "runtimes\ios\native\onnxruntime.xcframework.zip"
+if (-not (Test-Path $IosXcfZipSrc)) {
+    Write-Error "Expected iOS xcframework zip at $IosXcfZipSrc inside the CPU NuGet."
+}
+
+$IosXcfExtractDir = Join-Path $CacheDir "ort-ios-xcframework-$Version"
+if (Test-Path $IosXcfExtractDir) {
+    Remove-Item -Recurse -Force $IosXcfExtractDir
+}
+New-Item -ItemType Directory -Path $IosXcfExtractDir -Force | Out-Null
+Expand-Archive -Path $IosXcfZipSrc -DestinationPath $IosXcfExtractDir -Force
+
+# The inner zip extracts to onnxruntime.xcframework/ at the root of the
+# scratch dir. Locate it defensively (Microsoft's nesting could shift).
+$XcfRootCandidates = @(Get-ChildItem -Path $IosXcfExtractDir -Filter "onnxruntime.xcframework" -Directory -Recurse)
+if ($XcfRootCandidates.Count -eq 0) {
+    Write-Error "onnxruntime.xcframework not found inside $IosXcfZipSrc — Microsoft may have changed the inner-zip layout. Inspect $IosXcfExtractDir."
+}
+$XcfRoot = $XcfRootCandidates[0].FullName
+Write-Host "  iOS xcframework root: $XcfRoot"
+
+# Helper: patch + stage one slice's onnxruntime.framework into a renamed
+# InoOnnxRuntime.framework at the destination. The Python script handles
+# the binary rename, LC_ID_DYLIB rewrite, and Info.plist rewrite.
+function Stage-IosFramework {
+    param(
+        [Parameter(Mandatory)] [string]$SliceDir,    # e.g. <xcf-root>/ios-arm64
+        [Parameter(Mandatory)] [string]$DestFwDir,   # e.g. Source/ThirdParty/IOS/InoOnnxRuntime.framework
+        [Parameter(Mandatory)] [string]$Label        # for logging
+    )
+
+    if (-not (Test-Path $SliceDir)) {
+        Write-Error "[$Label] slice not found: $SliceDir (xcframework upstream layout may have changed)"
+    }
+
+    $SrcFw = Join-Path $SliceDir "onnxruntime.framework"
+    if (-not (Test-Path $SrcFw)) {
+        Write-Error "[$Label] onnxruntime.framework missing inside slice: $SrcFw"
+    }
+
+    Write-Host "  [PATCH] $Label framework: rename onnxruntime -> InoOnnxRuntime"
+    & python $script:ApplePatchScript --mode framework `
+        --input $SrcFw `
+        --output $DestFwDir `
+        --new-name InoOnnxRuntime
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "patch-ort-apple.py (framework mode, $Label) failed (exit $LASTEXITCODE). Did you 'pip install lief'?"
+    }
+
+    $StagedBin = Join-Path $DestFwDir "InoOnnxRuntime"
+    if (-not (Test-Path $StagedBin -PathType Leaf)) {
+        Write-Error "[$Label] post-patch binary missing at $StagedBin"
+    }
+    $sizeMb = [math]::Round((Get-Item $StagedBin).Length / 1MB, 1)
+    Write-Host "  [STAGE] $Label/InoOnnxRuntime ($sizeMb MB)"
+}
+
+# 1. iOS device (arm64 only — Apple dropped 32-bit + simulator-on-device
+#    long ago).
+Stage-IosFramework `
+    -SliceDir (Join-Path $XcfRoot "ios-arm64") `
+    -DestFwDir $IosFrameworkDir `
+    -Label "iOS device (arm64)"
+
+# 2. iOS simulator (arm64 + x86_64 fat). arm64 covers Apple Silicon Mac
+#    hosts running the simulator; x86_64 covers Intel Mac hosts. Devs
+#    iterating in Xcode simulator need this slice. Currently NOT wired
+#    into Build.cs (matches InoLlama's pattern; dev convenience only).
+Stage-IosFramework `
+    -SliceDir (Join-Path $XcfRoot "ios-arm64_x86_64-simulator") `
+    -DestFwDir $IosSimFrameworkDir `
+    -Label "iOS simulator (arm64 + x86_64)"
+
+Write-Host ""
+
+#---------------------------------------------------------------------
+# 10. Write version stamp
 #---------------------------------------------------------------------
 Set-Content -Path $StampFile -Value $ExpectedStamp -NoNewline -Encoding ASCII
 
 Write-Host "=== ORT $Version + DirectML $DmlVersion staged successfully ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Staged binaries:"
-Write-Host "  Windows ORT core:   $Win64BinStageDir\InoOnnxRuntime.dll  (renamed + import-patched)"
-Write-Host "  Windows ORT shared: $Win64BinStageDir\onnxruntime_providers_shared.dll"
-Write-Host "  DirectML runtime:   $Win64BinStageDir\InoDml.dll          (renamed)"
-Write-Host "  Android ORT:        $Arm64BinStageDir\libInoOnnxRuntime.so"
+Write-Host "  Windows ORT core:    $Win64BinStageDir\InoOnnxRuntime.dll  (renamed + import-patched)"
+Write-Host "  Windows ORT shared:  $Win64BinStageDir\onnxruntime_providers_shared.dll"
+Write-Host "  DirectML runtime:    $Win64BinStageDir\InoDml.dll          (renamed)"
+Write-Host "  Android ORT:         $Arm64BinStageDir\libInoOnnxRuntime.so"
+Write-Host "  Mac ORT:             $MacStageDir\libInoOnnxRuntime.dylib  (Apple Silicon)"
+Write-Host "  iOS device ORT:      $IosFrameworkDir\InoOnnxRuntime"
+Write-Host "  iOS simulator ORT:   $IosSimFrameworkDir\InoOnnxRuntime    (dev only — not wired into Build.cs)"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Verify Ino.Onnx.ProvidersTest inside PIE now lists DmlExecutionProvider."
+Write-Host "  1. Verify Ino.Onnx.ProvidersTest inside PIE now lists DmlExecutionProvider (Win64),"
+Write-Host "     CoreMLExecutionProvider (Mac/iOS), or NnapiExecutionProvider (Android)."
 Write-Host "  2. Flip Chatterbox Performance.bPreferDirectMl on (default true after Phase D+)."

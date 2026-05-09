@@ -75,7 +75,24 @@ private:
  *     has already mapped it, so dlopen returns the existing handle.
  *   - GetDllExport("OrtGetApiBase") via dlsym, then caches OrtApi*.
  *
- * Init() on iOS / Linux / macOS:
+ * Init() on Mac:
+ *   - Full absolute path to Source/ThirdParty/Mac/libInoOnnxRuntime.dylib
+ *     resolved via IPluginManager (mirrors the Windows path-resolution
+ *     pattern). dyld loads it via dlopen on the absolute path; no @rpath
+ *     lookup, no per-process cache collision possible.
+ *   - GetDllExport("OrtGetApiBase") via dlsym, then caches OrtApi*.
+ *
+ * Init() on iOS:
+ *   - InoOnnxRuntime.framework is auto-loaded by dyld at app launch
+ *     (declared via PublicAdditionalFrameworks in InoOnnx.Build.cs), so
+ *     OrtGetApiBase is in the process's global symbol namespace by the
+ *     time this Init() runs. Skips GetDllHandle entirely; resolves
+ *     OrtGetApiBase via dlsym(RTLD_DEFAULT, ...) instead, returns a
+ *     0x1 sentinel handle so Shutdown can distinguish "initialized"
+ *     from "Init returned nullptr". FreeDllHandle is never called on
+ *     the sentinel.
+ *
+ * Init() on Linux:
  *   - Warns. GetApi() returns nullptr. Any consumer that calls GetApi()
  *     and checks the return handles this gracefully.
  */

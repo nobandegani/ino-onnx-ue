@@ -363,6 +363,39 @@ namespace
                         Opts, "WebGPU", nullptr, nullptr, 0);
                     break;
 
+                case EInoOnnxProvider::CoreMl:
+#if PLATFORM_MAC || PLATFORM_IOS
+                    // CoreML EP is statically compiled into the Apple-platform
+                    // ORT builds we stage (osx-arm64 dylib, ios-arm64 framework).
+                    // Microsoft also ships a legacy C-only entry point
+                    // OrtSessionOptionsAppendExecutionProvider_CoreML(opts, flags)
+                    // declared in coreml_provider_factory.h; we deliberately use
+                    // the modern generic vtable call instead so we don't have to
+                    // maintain a second per-platform header dependency. ORT
+                    // routes "CoreML" to the same registered factory either way.
+                    //
+                    // Provider options the EP recognises (key/val UTF-8):
+                    //   "MLComputeUnits"     CPUOnly | CPUAndNeuralEngine |
+                    //                        CPUAndGPU | ALL
+                    //   "ModelFormat"        NeuralNetwork | MLProgram
+                    //   "RequireStaticInputShapes"  0 | 1
+                    //   "EnableOnSubgraphs"  0 | 1
+                    //   "SpecializationStrategy"  Default | FastPrediction
+                    //
+                    // We pass none today — defaults (ALL compute units,
+                    // automatic format selection) cover the typical TTS /
+                    // vision-encoder workloads. Add a typed FInoOnnxSessionOptions
+                    // sub-struct (analogous to bNnapi*) if a consumer needs
+                    // explicit control later.
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "CoreML", /*keys=*/nullptr, /*vals=*/nullptr, /*num_entries=*/0);
+                    break;
+#else
+                    UE_LOG(LogInoOnnx, Warning,
+                           TEXT("Onnx: Provider: CoreML is macOS / iOS only; skipping on this platform"));
+                    continue;
+#endif
+
                 case EInoOnnxProvider::DirectMl:
 #if PLATFORM_WINDOWS
                     // DML uses a dedicated OrtDmlApi vtable, NOT the generic

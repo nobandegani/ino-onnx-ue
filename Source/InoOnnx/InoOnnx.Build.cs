@@ -130,6 +130,8 @@ public class InoOnnx : ModuleRules
 		string PublicDir      = Path.Combine(ThirdPartyDir, "Public");
 		string Win64Dir       = Path.Combine(ThirdPartyDir, "Win64");
 		string AndroidBaseDir = Path.Combine(ThirdPartyDir, "Android");
+		string MacDir         = Path.Combine(ThirdPartyDir, "Mac");
+		string IosFwDir       = Path.Combine(ThirdPartyDir, "IOS", "InoOnnxRuntime.framework");
 
 		// Public headers — consumers do
 		//     #include "onnxruntime_c_api.h"
@@ -210,8 +212,81 @@ public class InoOnnx : ModuleRules
 				"AndroidPlugin",
 				Path.Combine(ModuleDirectory, "InoOnnx_UPL_Android.xml"));
 		}
-		// iOS / Linux / macOS: not yet implemented. Linking succeeds because
-		// no static references; runtime calls fail gracefully when the
-		// dynamic load can't find the library.
+		else if (Target.Platform == UnrealTargetPlatform.Mac)
+		{
+			// Mac: dynamic loading only — same isolation rationale as Win64
+			// and Android. Even though no UE 5.7 plugin currently ships its
+			// own libonnxruntime.dylib, keeping the load explicit (dlopen
+			// by full path resolved via IPluginManager) means we can never
+			// accidentally dyld-bind to a future Marketplace plugin's copy
+			// at app launch. Apple Silicon only — Microsoft drops Intel
+			// Mac in modern ORT NuGets.
+			//
+			// Staged by setup-onnxruntime.ps1 from the regular CPU NuGet
+			// (NOT the DirectML one — DML is Windows-only):
+			//   runtimes/osx-arm64/native/libonnxruntime.dylib
+			//     -> Source/ThirdParty/Mac/libInoOnnxRuntime.dylib
+			// LC_ID_DYLIB rewritten to @rpath/libInoOnnxRuntime.dylib via
+			// patch-ort-apple.py (lief-based) so the install_name matches
+			// the renamed file. CoreML EP is statically compiled into this
+			// build and self-registers when the dylib is mapped.
+			string MacDylib = Path.Combine(MacDir, "libInoOnnxRuntime.dylib");
+			if (File.Exists(MacDylib))
+			{
+				// RuntimeDependencies stages the dylib alongside the
+				// packaged executable. UE's Mac packaging copies it into
+				// <Game>.app/Contents/UE/<plugin-relative-path>/ — our
+				// IPluginManager-resolved Init path picks it up there.
+				RuntimeDependencies.Add(MacDylib);
+			}
+		}
+		else if (Target.Platform == UnrealTargetPlatform.IOS)
+		{
+			// iOS: PublicAdditionalFrameworks does double duty — adds
+			// `-framework InoOnnxRuntime` to the link command AND embeds
+			// InoOnnxRuntime.framework into the .app's Frameworks/
+			// directory at packaging time. dyld auto-loads the framework
+			// at app launch before any UE module runs, so by the time
+			// our StartupModule fires every Ort* symbol is already in
+			// the process's global namespace.
+			//
+			// Why this differs from Win64/Android/Mac dynamic-load pattern:
+			//   iOS has no reliable equivalent of dlopen-by-full-path that
+			//   works across all supported iOS versions + signing modes
+			//   (App Store, ad-hoc, dev). Embedded frameworks must be
+			//   declared at build time so the code-signing pass picks
+			//   them up. Our InoOnnx.cpp's iOS Init resolves OrtGetApiBase
+			//   via dlsym(RTLD_DEFAULT, ...) so the consumer-facing API
+			//   stays uniform across platforms; only the load mechanism
+			//   differs.
+			//
+			// Staged by setup-onnxruntime.ps1 from the CPU NuGet:
+			//   runtimes/ios/native/onnxruntime.xcframework.zip (nested)
+			//     -> ios-arm64/onnxruntime.framework slice
+			//     -> renamed end-to-end via patch-ort-apple.py:
+			//          - framework dir   onnxruntime.framework -> InoOnnxRuntime.framework
+			//          - binary name     onnxruntime           -> InoOnnxRuntime
+			//          - LC_ID_DYLIB     -> @rpath/InoOnnxRuntime.framework/InoOnnxRuntime
+			//          - Info.plist      CFBundleExecutable / Name / Identifier
+			//
+			// Currently we only ship the device slice (arm64). The
+			// simulator slice exists at Source/ThirdParty/IOS/Simulator/
+			// for development convenience but is not wired in here —
+			// UE 5.7's iOS toolchain targets device builds in shipped
+			// game flow, and devs running in simulator can flip this
+			// path or branch on Target.Architecture. (Future follow-up;
+			// not blocking initial iOS support.)
+			if (Directory.Exists(IosFwDir))
+			{
+				PublicAdditionalFrameworks.Add(new Framework(
+					"InoOnnxRuntime",
+					IosFwDir,
+					/*CopyBundledAssets*/ null,
+					/*bCopyFramework*/ true));
+			}
+		}
+		// Linux: not yet implemented. Linking succeeds because no static
+		// references; runtime calls fail gracefully when the dynamic load
+		// can't find the library.
 	}
 }

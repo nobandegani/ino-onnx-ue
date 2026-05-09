@@ -133,6 +133,7 @@ const TCHAR* ProviderToString(EInoOnnxProvider Provider)
         case EInoOnnxProvider::Nnapi:     return TEXT("NNAPI");
         case EInoOnnxProvider::WebGpu:    return TEXT("WebGPU");
         case EInoOnnxProvider::DirectMl:  return TEXT("DirectML");
+        case EInoOnnxProvider::CoreMl:    return TEXT("CoreML");
         case EInoOnnxProvider::Cuda:      return TEXT("CUDA");
         case EInoOnnxProvider::TensorRt:  return TEXT("TensorRT");
         default:                          return TEXT("Unknown");

@@ -18,6 +18,15 @@
     #include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
+#if PLATFORM_IOS
+    // For dlsym(RTLD_DEFAULT, "OrtGetApiBase"). On iOS the framework is
+    // auto-loaded by dyld at app launch (declared via
+    // PublicAdditionalFrameworks in InoOnnx.Build.cs), so we never call
+    // GetDllHandle — we resolve OrtGetApiBase against the process's
+    // global namespace via dlsym instead.
+    #include <dlfcn.h>
+#endif
+
 // ONNX Runtime C API. Included for the struct / function-type definitions
 // (OrtApi, OrtApiBase, OrtStatus, OrtGetApiBase signature, etc.). We do
 // NOT link against the ORT import library:
@@ -60,6 +69,21 @@ namespace
      *   at build time. The UPL's soLoadLibrary preload has already
      *   mapped the .so into the process by this point, so dlopen just
      *   returns the existing handle.
+     *
+     * Mac: same pattern as Windows — full absolute path resolved via
+     *   IPluginManager, pointing at our renamed
+     *   Source/ThirdParty/Mac/libInoOnnxRuntime.dylib. dyld handles the
+     *   load via dlopen on the absolute path; @rpath logic doesn't apply
+     *   because we're loading the dylib by full filesystem path, not by
+     *   install-name lookup.
+     *
+     * iOS: returns empty as a sentinel. The framework is auto-loaded by
+     *   dyld at app launch (PublicAdditionalFrameworks bCopyFramework=true
+     *   in InoOnnx.Build.cs), so there is no GetDllHandle step — Init()
+     *   detects the empty path and skips straight to symbol resolution
+     *   against RTLD_DEFAULT via dlsym. Calling dlopen on iOS would still
+     *   work for embedded frameworks but adds a per-init filesystem
+     *   lookup we don't need.
      */
     FString ResolveOnnxLibraryName()
     {
@@ -75,6 +99,20 @@ namespace
             TEXT("InoOnnxRuntime.dll"));
 #elif PLATFORM_ANDROID
         return FString(TEXT("libInoOnnxRuntime.so"));
+#elif PLATFORM_MAC
+        const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoOnnx"));
+        if (!Plugin.IsValid())
+        {
+            return FString();
+        }
+        return FPaths::Combine(
+            Plugin->GetBaseDir(),
+            TEXT("Source/ThirdParty/Mac"),
+            TEXT("libInoOnnxRuntime.dylib"));
+#elif PLATFORM_IOS
+        // Sentinel: empty path tells Init() to skip dlopen and go
+        // straight to dlsym(RTLD_DEFAULT) for OrtGetApiBase resolution.
+        return FString();
 #else
         return FString();
 #endif
@@ -337,19 +375,29 @@ void* Init()
            TEXT("Onnx: Module: Init — loading ONNX Runtime DLLs (compiled-against ORT_API_VERSION=%u)"),
            (uint32)ORT_API_VERSION);
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
-    // Unified dlopen + dlsym path. We deliberately DO NOT link libUnreal
-    // against our ORT .so on either platform — see InoOnnx.Build.cs for
-    // the rationale (base-name cache collision on Windows; symbol-version
-    // collision on Android with marketplace plugins shipping older ORT).
-    // GetDllExport("OrtGetApiBase") at runtime bypasses the static linker
-    // entirely and binds to whatever version our specific DLL/.so provides.
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_MAC || PLATFORM_IOS
+    // Unified dlopen + dlsym path across every platform we support. We
+    // deliberately DO NOT link libUnreal against our ORT binary on
+    // Windows / Android / Mac — see InoOnnx.Build.cs for the rationale
+    // (base-name cache collision on Windows; symbol-version collision
+    // on Android with marketplace plugins shipping older ORT;
+    // dyld-binding hygiene on Mac).
+    //
+    // iOS is the sole exception: the framework is statically declared
+    // via PublicAdditionalFrameworks, so dyld auto-loads it at app
+    // launch and OrtGetApiBase ends up in the process's global symbol
+    // namespace before this Init() runs. We resolve it via dlsym
+    // RTLD_DEFAULT instead of going through GetDllHandle.
 
 #if PLATFORM_WINDOWS
     PreloadWin64Deps();
 #endif
 
     const FString LibName = ResolveOnnxLibraryName();
+
+#if !PLATFORM_IOS
+    // Win64 / Android / Mac: explicit dlopen on the resolved path /
+    // bare soname. iOS skips this entirely and uses dlsym below.
     if (LibName.IsEmpty())
     {
         UE_LOG(LogInoOnnx, Warning,
@@ -381,7 +429,6 @@ void* Init()
 #endif
 
     // Resolve the single entry-point symbol we need.
-    using OrtGetApiBaseFn = const OrtApiBase* (*)();
     void* EntryPoint = FPlatformProcess::GetDllExport(Handle, TEXT("OrtGetApiBase"));
     if (EntryPoint == nullptr)
     {
@@ -392,11 +439,41 @@ void* Init()
         FPlatformProcess::FreeDllHandle(Handle);
         return nullptr;
     }
+#else
+    // iOS path — framework already mapped by dyld, no GetDllHandle.
+    // Sentinel handle (0x1) so the Shutdown path can distinguish
+    // "successfully initialized on iOS" from "Init returned nullptr".
+    // FreeDllHandle is never called on this sentinel; dlclose on
+    // RTLD_DEFAULT is illegal anyway.
+    if (!LibName.IsEmpty())
+    {
+        UE_LOG(LogInoOnnx, Warning,
+               TEXT("Onnx: Module: iOS Init received non-empty LibName '%s'; ignoring ")
+               TEXT("(iOS uses auto-linked framework + RTLD_DEFAULT, not explicit dlopen)."),
+               *LibName);
+    }
+    UE_LOG(LogInoOnnx, Verbose,
+           TEXT("Onnx: Module: iOS — relying on dyld-loaded InoOnnxRuntime.framework; ")
+           TEXT("resolving OrtGetApiBase via dlsym(RTLD_DEFAULT)."));
+
+    void* EntryPoint = dlsym(RTLD_DEFAULT, "OrtGetApiBase");
+    if (EntryPoint == nullptr)
+    {
+        UE_LOG(LogInoOnnx, Error,
+               TEXT("Onnx: Module: dlsym(RTLD_DEFAULT, \"OrtGetApiBase\") returned null. ")
+               TEXT("InoOnnxRuntime.framework was not auto-loaded by dyld — check that ")
+               TEXT("InoOnnx.Build.cs's PublicAdditionalFrameworks call is reaching the ")
+               TEXT("packaging stage and the framework was code-signed correctly."));
+        return nullptr;
+    }
+    void* Handle = reinterpret_cast<void*>(0x1);
+#endif // !PLATFORM_IOS
 
     UE_LOG(LogInoOnnx, Verbose,
-           TEXT("Onnx: Module: GetDllExport(\"OrtGetApiBase\") resolved at %p"),
+           TEXT("Onnx: Module: OrtGetApiBase resolved at %p"),
            EntryPoint);
 
+    using OrtGetApiBaseFn = const OrtApiBase* (*)();
     const OrtApiBase* ApiBase = reinterpret_cast<OrtGetApiBaseFn>(EntryPoint)();
     if (ApiBase != nullptr && ApiBase->GetVersionString != nullptr)
     {
@@ -410,7 +487,9 @@ void* Init()
     GOrtApi = SelectOrtApi(ApiBase);
     if (GOrtApi == nullptr)
     {
+#if !PLATFORM_IOS
         FPlatformProcess::FreeDllHandle(Handle);
+#endif
         return nullptr;
     }
 
@@ -421,7 +500,7 @@ void* Init()
     return Handle;
 
 #else
-    // iOS / Linux / macOS: no library staged for these platforms yet.
+    // Linux: no library staged for this platform yet.
     UE_LOG(LogInoOnnx, Warning,
            TEXT("Onnx: Module: ONNX Runtime is not yet available on this platform."));
     return nullptr;
@@ -445,13 +524,21 @@ void Shutdown(void* Handle)
     // to unload. Happens-before ordering matters here.
     GOrtApi = nullptr;
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_MAC
     if (Handle != nullptr)
     {
         FPlatformProcess::FreeDllHandle(Handle);
         UE_LOG(LogInoOnnx, Verbose,
                TEXT("Onnx: Module: FreeDllHandle released ONNX Runtime handle"));
     }
+#elif PLATFORM_IOS
+    // iOS Handle is the 0x1 sentinel — we never called GetDllHandle, so
+    // there is nothing to free. dlclose on RTLD_DEFAULT is illegal, and
+    // we don't own the framework's lifetime anyway (dyld loaded it at
+    // app launch and will release it at process exit).
+    (void)Handle;
+    UE_LOG(LogInoOnnx, Verbose,
+           TEXT("Onnx: Module: iOS — framework owned by dyld, no FreeDllHandle call."));
 #else
     (void)Handle;
 #endif
