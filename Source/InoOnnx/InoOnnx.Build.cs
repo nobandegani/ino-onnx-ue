@@ -139,6 +139,16 @@ public class InoOnnx : ModuleRules
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
+			// DXGI system library — used by the Ino.Onnx.ListDmlAdapters
+			// console command (Private/SmokeTests/InoOnnxListDmlAdaptersTest.cpp)
+			// to enumerate D3D12 adapters via IDXGIFactory::EnumAdapters.
+			// That order matches DirectML's `device_id` indexing exactly,
+			// so it's the diagnostic that lets a user pick the right value
+			// for FInoOnnxSessionOptions::DirectMlAdapterIndex. System lib
+			// — part of the Windows SDK on every UE build host; no runtime
+			// redistribution needed.
+			PublicSystemLibraries.Add("dxgi.lib");
+
 			// Windows: dynamic loading only. NO PublicAdditionalLibraries,
 			// NO PublicDelayLoadDLLs. The runtime consumer resolves
 			// OrtGetApiBase via GetProcAddress on the renamed
