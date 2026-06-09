@@ -1,2 +1,5 @@
-Binaries/
-Intermediate/
+Binaries/Win64
+Binaries/Android
+Binaries/Mac
+Binaries/IOS
+Intermediate
