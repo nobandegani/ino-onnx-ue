@@ -1,3 +1,4 @@
+# Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 # patch-ort-apple.py
 #
 # Apple-platform Mach-O / framework patcher for the InoOnnx plugin.

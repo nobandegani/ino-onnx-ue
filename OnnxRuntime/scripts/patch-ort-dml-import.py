@@ -1,3 +1,4 @@
+# Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 # patch-ort-dml-import.py
 #
 # Patch an ONNX Runtime DLL's import table so its static dependency on

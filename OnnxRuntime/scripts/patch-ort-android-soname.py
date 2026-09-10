@@ -1,3 +1,4 @@
+# Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 # patch-ort-android-soname.py
 #
 # Patch the SONAME (DT_SONAME) inside an ONNX Runtime .so for Android so
