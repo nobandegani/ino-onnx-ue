@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working
 inside `Plugins/InoOnnx/`. The hosting demo project is documented in
-`E:/Projects/InoProject/CLAUDE.md`.
+the host UE project's own `CLAUDE.md` (not part of this repository).
 
 ## Purpose
 
